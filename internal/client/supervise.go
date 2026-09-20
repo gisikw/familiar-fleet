@@ -304,12 +304,14 @@ func (r Runtime) RunInteractive(ctx context.Context) error {
 	}
 
 	var result error
+	serverExited := false
 	select {
 	case err := <-tui.done:
 		if err != nil {
 			result = fmt.Errorf("Herdr TUI exited: %w", err)
 		}
 	case err := <-server.done():
+		serverExited = true
 		result = fmt.Errorf("Herdr server exited unexpectedly: %w", exitError(err))
 		tui.stop(5 * time.Second)
 	case err := <-sshd.done:
@@ -319,8 +321,10 @@ func (r Runtime) RunInteractive(ctx context.Context) error {
 		tui.stop(5 * time.Second)
 	}
 	stopInfrastructure()
-	r.Logger.Printf("tunnel and callback sshd stopped; Herdr session %s left running", herdrSession)
-	fmt.Fprintf(r.TUIErr, "Herdr session %s and its agents are still running. Reattach with familiar-fleet, or end it with familiar-fleet stop.\n", herdrSession)
+	if !serverExited {
+		r.Logger.Printf("tunnel and callback sshd stopped; Herdr session %s left running", herdrSession)
+		fmt.Fprintf(r.TUIErr, "Herdr session %s and its agents are still running. Reattach with familiar-fleet, or end it with familiar-fleet stop.\n", herdrSession)
+	}
 	return result
 }
 
@@ -344,10 +348,7 @@ func (r Runtime) RunHerdr(ctx context.Context) error {
 	}
 	select {
 	case err := <-server.child.done:
-		if err != nil {
-			return fmt.Errorf("Herdr server exited: %w", err)
-		}
-		return nil
+		return fmt.Errorf("Herdr server exited unexpectedly: %w", exitError(err))
 	case <-ctx.Done():
 		r.stopHerdrServer()
 		server.child.stop(10 * time.Second)
