@@ -22,7 +22,7 @@ var version = "dev"
 
 type options struct {
 	endpoint, name, tokenFile, hostKey, stateDir string
-	herdr, ssh, sshd, keygen, nix                string
+	herdr, ssh, sshd, keygen, nix, nixStore      string
 }
 
 type invocation struct {
@@ -55,6 +55,7 @@ func parseInvocation(args []string, output io.Writer) (invocation, error) {
 	fs.StringVar(&o.sshd, "sshd", "sshd", "OpenSSH server executable")
 	fs.StringVar(&o.keygen, "ssh-keygen", "ssh-keygen", "ssh-keygen executable")
 	fs.StringVar(&o.nix, "nix", "nix", "nix executable (runtime apply)")
+	fs.StringVar(&o.nixStore, "nix-store", "nix-store", "nix-store executable (runtime GC roots)")
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: familiar-fleet [options] [connect <familiar-url>|runtime <apply|rollback|status>|herdr|tunnel|version]")
 		fmt.Fprintln(fs.Output(), "       familiar-fleet [options]              # tunnel + visible Herdr TUI")
@@ -249,6 +250,9 @@ func runtimeCommand(ctx context.Context, paths client.Paths, o options, args []s
 		if err != nil {
 			return err
 		}
+		if err := store.PruneGCRoots(); err != nil {
+			return fmt.Errorf("runtime rolled back, but pruning old GC roots failed: %w", err)
+		}
 		fmt.Printf("runtime/current -> %s\n", target)
 		return nil
 	case "apply":
@@ -270,9 +274,19 @@ func runtimeCommand(ctx context.Context, paths client.Paths, o options, args []s
 		if err := fleetruntime.Smoke(ctx, target); err != nil {
 			return fmt.Errorf("runtime failed validation; not activated: %w", err)
 		}
+		nixStore, err := client.FindBinary(o.nixStore)
+		if err != nil {
+			return err
+		}
+		if err := store.RegisterGCRoot(ctx, nixStore, target); err != nil {
+			return fmt.Errorf("retain runtime: %w", err)
+		}
 		changed, err := store.Activate(target)
 		if err != nil {
 			return err
+		}
+		if err := store.PruneGCRoots(); err != nil {
+			return fmt.Errorf("runtime activated, but pruning old GC roots failed: %w", err)
 		}
 		if changed {
 			fmt.Printf("activated runtime/current -> %s\n", target)

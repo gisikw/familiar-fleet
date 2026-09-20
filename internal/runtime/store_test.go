@@ -240,6 +240,36 @@ func TestBuildPassesThroughAbsolutePathsAndParsesNixOutput(t *testing.T) {
 	}
 }
 
+func TestRegisterAndPruneGCRoots(t *testing.T) {
+	s := New(filepath.Join(t.TempDir(), "runtime"))
+	fake := filepath.Join(t.TempDir(), "nix-store")
+	script := "#!/bin/sh\n[ \"$1\" = --add-root ] || exit 9\nln -s \"$5\" \"$2\"\n"
+	if err := os.WriteFile(fake, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	target := "/nix/store/00000000000000000000000000000000-familiar-worker-runtime"
+	if err := s.RegisterGCRoot(context.Background(), fake, target); err != nil {
+		t.Fatal(err)
+	}
+	root := filepath.Join(s.GCRoots(), filepath.Base(target))
+	if got := readLink(t, root); got != target {
+		t.Fatalf("root=%s want %s", got, target)
+	}
+	// Registration is idempotent even if the helper is no longer available.
+	if err := s.RegisterGCRoot(context.Background(), "/nonexistent/nix-store", target); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RegisterGCRoot(context.Background(), fake, t.TempDir()); err == nil {
+		t.Fatal("non-store runtime must not be registered")
+	}
+	if err := s.PruneGCRoots(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(root); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unreferenced root was not pruned: %v", err)
+	}
+}
+
 func TestSmokeRunsRequiredTool(t *testing.T) {
 	ok := fakeRuntime(t, "ok", true)
 	if err := Smoke(context.Background(), ok); err != nil {

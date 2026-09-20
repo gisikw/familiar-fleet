@@ -71,6 +71,7 @@ stable, node-local pointers under the state directory:
 ```text
 <state>/runtime/current   -> /nix/store/…-familiar-worker-runtime   (in use)
 <state>/runtime/previous  -> /nix/store/…-familiar-worker-runtime   (last good)
+<state>/runtime/gcroots/… -> /nix/store/…-familiar-worker-runtime   (Nix roots)
 ```
 
 ```sh
@@ -85,10 +86,11 @@ accepts an existing absolute store path), validates that the output is a directo
 with an executable `bin/pi`, smoke-runs `bin/pi --version`, then atomically repoints
 `current` (temporary symlink + `rename(2)`), first moving the old `current` to
 `previous`. It is idempotent: re-applying the active target changes nothing. A
-failed build, validation, or smoke test leaves both pointers untouched. `rollback`
-swaps the two pointers and refuses if `previous` is missing or unusable (for
-example after garbage collection). `status` reports both pointers and exits
-non-zero when nothing usable is active.
+failed build, validation, smoke test, or GC-root registration leaves both pointers
+untouched. The active and previous outputs are registered as indirect Nix GC roots;
+older roots are pruned after successful activation. `rollback` swaps the two pointers
+and refuses if `previous` is missing or unusable. `status` reports both pointers and
+exits non-zero when nothing usable is active.
 
 Because the Herdr server and every pane reference `<state>/runtime/current/bin`
 rather than a store path, applying a new runtime takes effect in new panes and even
@@ -106,11 +108,14 @@ Before the Familiar-owned Herdr server starts (`familiar-fleet` or
 2. resolves the user's shell from `$SHELL` (falling back to `/bin/sh` with a logged
    note; refusing to select the Familiar launcher itself);
 3. regenerates `<state>/pane-shell` and `<state>/shell/*`;
-4. writes `<state>/herdr-config.toml`—the user's own Herdr `config.toml` with
+4. projects the runtime's public Pi settings into writable `<state>/runtime/pi`, with
+   its extension path routed through the stable `runtime/current` pointer;
+5. writes `<state>/herdr-config.toml`—the user's own Herdr `config.toml` with
    Familiar's `[terminal]` `default_shell` and `shell_mode` applied, everything else
    preserved—and validates it with `herdr config check`;
-5. starts `herdr server` with `runtime/current/bin` first on `PATH` and
-   `HERDR_CONFIG_PATH` pointing at the generated file.
+6. starts `herdr server` with `runtime/current/bin` first on `PATH`,
+   `PI_CODING_AGENT_DIR` pointing at the projected profile, and `HERDR_CONFIG_PATH`
+   pointing at the generated file.
 
 Only native Herdr configuration is used; Herdr is not patched. The TUI client keeps
 reading the user's own config for keybindings and chrome.
@@ -226,6 +231,8 @@ The directory is mode `0700`. Important files are:
 - `sshd_host_ed25519`: local callback server host identity;
 - generated `authorized_keys`, `known_hosts`, `sshd_config`, and wrappers;
 - `runtime/current` and `runtime/previous`: symlinks to activated runtimes;
+- `runtime/gcroots/`: registered Nix roots retaining those two runtime outputs;
+- `runtime/pi/`: writable Pi profile projected from the active runtime;
 - `pane-shell` and `shell/`: generated Herdr pane launcher and per-shell startup
   files (regenerated on every server start);
 - `herdr-config.toml`: generated server configuration.

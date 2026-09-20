@@ -60,6 +60,20 @@ func TestPrepareHerdrEnvironmentBuildsServerEnv(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(rt, "bin", "pi"), []byte("#!/bin/sh\necho pi\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
+	profile := filepath.Join(rt, "share", "familiar-worker", "profile")
+	extension := filepath.Join(rt, "share", "familiar-worker", "extensions", "tiamat")
+	if err := os.MkdirAll(profile, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(extension, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profile, "settings.json"), []byte(`{"extensions":["/nix/store/old"],"defaultProjectTrust":"never"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extension, "index.ts"), []byte("export {};\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := fleetruntime.New(p.RuntimeDir).Activate(rt); err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +100,7 @@ func TestPrepareHerdrEnvironmentBuildsServerEnv(t *testing.T) {
 	if env["PATH"] != p.RuntimeDir+"/current/bin:/usr/bin:/bin" {
 		t.Errorf("PATH=%q", env["PATH"])
 	}
-	if env["HERDR_CONFIG_PATH"] != p.HerdrConfig || env["FAMILIAR_RUNTIME_BIN"] != p.RuntimeDir+"/current/bin" || env["TERM"] != "xterm" {
+	if env["HERDR_CONFIG_PATH"] != p.HerdrConfig || env["PI_CODING_AGENT_DIR"] != p.PiDir || env["FAMILIAR_RUNTIME_BIN"] != p.RuntimeDir+"/current/bin" || env["TERM"] != "xterm" {
 		t.Errorf("env=%v", env)
 	}
 	for _, kv := range got.Env {
@@ -114,6 +128,13 @@ func TestPrepareHerdrEnvironmentBuildsServerEnv(t *testing.T) {
 	}
 	if info, err := os.Stat(p.HerdrConfig); err != nil || info.Mode().Perm()&0077 != 0 {
 		t.Fatalf("generated config must be owner-only: %v %v", info, err)
+	}
+	projected, err := os.ReadFile(filepath.Join(p.PiDir, "settings.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(projected), p.RuntimeDir+"/current/share/familiar-worker/extensions/tiamat") || strings.Contains(string(projected), "/nix/store/old") {
+		t.Fatalf("Pi profile does not use the stable runtime projection:\n%s", projected)
 	}
 
 	// Rejected config is fatal.

@@ -40,6 +40,7 @@ func (s Store) Previous() string { return filepath.Join(s.Dir, PreviousName) }
 
 // CurrentBin is the stable PATH entry that Herdr and pane shells reference.
 func (s Store) CurrentBin() string { return filepath.Join(s.Current(), "bin") }
+func (s Store) GCRoots() string    { return filepath.Join(s.Dir, "gcroots") }
 
 // ErrNoRuntime reports that no runtime has been activated on this node.
 var ErrNoRuntime = errors.New("no Familiar runtime is activated")
@@ -215,8 +216,77 @@ func replaceSymlink(link, target string) error {
 	return os.Rename(tmpLink, link)
 }
 
+// RegisterGCRoot asks Nix to retain target through an indirect root beneath
+// the state directory. Ordinary symlinks outside Nix's gcroots are not roots;
+// without this step a routine `nix store gc` could remove current or previous.
+func (s Store) RegisterGCRoot(ctx context.Context, nixStorePath, target string) error {
+	target = filepath.Clean(target)
+	if filepath.Dir(target) != "/nix/store" {
+		return fmt.Errorf("runtime %s is not an immutable /nix/store output", target)
+	}
+	if err := os.MkdirAll(s.GCRoots(), 0700); err != nil {
+		return err
+	}
+	root := filepath.Join(s.GCRoots(), filepath.Base(target))
+	if existing, err := os.Readlink(root); err == nil {
+		if existing == target {
+			return nil
+		}
+		return fmt.Errorf("GC root %s points at unexpected target %s", root, existing)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect GC root %s: %w", root, err)
+	}
+	cmd := exec.CommandContext(ctx, nixStorePath, "--add-root", root, "--indirect", "--realise", target)
+	// Modern Nix installs nix-store as a multicall symlink to `nix`. Our
+	// executable resolver canonicalizes symlinks, so preserve the legacy
+	// frontend selection explicitly through argv[0].
+	cmd.Args[0] = "nix-store"
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("register Nix GC root for %s: %w: %s", target, err, strings.TrimSpace(string(out)))
+	}
+	if existing, err := os.Readlink(root); err != nil || existing != target {
+		return fmt.Errorf("nix-store did not create expected GC root %s -> %s", root, target)
+	}
+	return nil
+}
+
+// PruneGCRoots retains roots for exactly current and previous. Nix's indirect
+// auto-root entries may briefly point at removed links; Nix ignores and later
+// cleans those dangling registrations.
+func (s Store) PruneGCRoots() error {
+	keep := map[string]bool{}
+	for _, name := range []string{CurrentName, PreviousName} {
+		if target, err := s.Pointer(name); err == nil {
+			keep[target] = true
+		} else if !errors.Is(err, ErrNoRuntime) {
+			return err
+		}
+	}
+	entries, err := os.ReadDir(s.GCRoots())
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		path := filepath.Join(s.GCRoots(), entry.Name())
+		target, err := os.Readlink(path)
+		if err != nil {
+			return fmt.Errorf("GC root %s is not a readable symlink: %w", path, err)
+		}
+		if !keep[target] {
+			if err := os.Remove(path); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // Build realizes a Nix flake installable without creating a result link and
-// returns its single output path. Installables that are already absolute
+// returns its single output path. The caller registers the validated output as
+// a GC root before activation. Installables that are already absolute
 // directories are returned as-is so pre-built store paths can be activated.
 func Build(ctx context.Context, nixPath, installable string) (string, error) {
 	if filepath.IsAbs(installable) {

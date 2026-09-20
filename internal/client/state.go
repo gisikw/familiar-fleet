@@ -33,9 +33,10 @@ type Paths struct {
 	Dir, State, Log, TunnelKey, TunnelPublicKey, HostKey, HostPublicKey      string
 	AuthorizedKeys, KnownHosts, SSHDConfig, SSHDPid, HerdrWrapper, SSHBridge string
 	// RuntimeDir holds the stable runtime/current and runtime/previous pointers.
+	// PiDir is the mutable node-local Pi profile projected from the active runtime.
 	// PaneShell is the generated Herdr default_shell launcher; HerdrConfig is the
 	// generated HERDR_CONFIG_PATH for the Familiar-owned server.
-	RuntimeDir, PaneShell, HerdrConfig string
+	RuntimeDir, PiDir, PaneShell, HerdrConfig string
 }
 
 // ResolveStateDir implements the deterministic state-location precedence used
@@ -84,8 +85,8 @@ func StatePaths(override string) (Paths, error) {
 		AuthorizedKeys: filepath.Join(abs, "authorized_keys"), KnownHosts: filepath.Join(abs, "known_hosts"),
 		SSHDConfig: filepath.Join(abs, "sshd_config"), SSHDPid: filepath.Join(abs, "sshd.pid"),
 		HerdrWrapper: filepath.Join(abs, "herdr"), SSHBridge: filepath.Join(abs, "ssh-bridge"),
-		RuntimeDir: filepath.Join(abs, "runtime"), PaneShell: filepath.Join(abs, "pane-shell"),
-		HerdrConfig: filepath.Join(abs, "herdr-config.toml"),
+		RuntimeDir: filepath.Join(abs, "runtime"), PiDir: filepath.Join(abs, "runtime", "pi"),
+		PaneShell: filepath.Join(abs, "pane-shell"), HerdrConfig: filepath.Join(abs, "herdr-config.toml"),
 	}, nil
 }
 

@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -53,10 +54,12 @@ func environMap(environ []string) map[string]string {
 //  1. requires an activated, valid runtime/current (no ambient pi fallback);
 //  2. resolves the user's shell from the parent environment;
 //  3. regenerates the pane launcher and its rc files;
-//  4. writes the generated Herdr config (user's config.toml plus Familiar's
+//  4. projects the runtime's public Pi profile into mutable node-local state;
+//  5. writes the generated Herdr config (user's config.toml plus Familiar's
 //     [terminal] table) and validates it with `herdr config check`;
-//  5. returns the server environment with runtime/current/bin first on PATH
-//     and HERDR_CONFIG_PATH pointing at the generated file.
+//  6. returns the server environment with runtime/current/bin first on PATH,
+//     PI_CODING_AGENT_DIR set to that profile, and HERDR_CONFIG_PATH pointing
+//     at the generated file.
 //
 // Because PATH references the stable pointer, later `runtime apply` runs
 // take effect in new panes without restarting Herdr.
@@ -87,6 +90,9 @@ func PrepareHerdrEnvironment(ctx context.Context, paths Paths, herdr string, env
 	if err := WritePaneShell(paths, spec); err != nil {
 		return result, fmt.Errorf("write pane shell launcher: %w", err)
 	}
+	if err := writePiProfile(paths, store); err != nil {
+		return result, fmt.Errorf("project Pi profile from active runtime: %w", err)
+	}
 
 	userConfigPath := UserHerdrConfigPath(env)
 	userConfig, err := os.ReadFile(userConfigPath)
@@ -101,17 +107,17 @@ func PrepareHerdrEnvironment(ctx context.Context, paths Paths, herdr string, env
 		return result, fmt.Errorf("write generated Herdr config: %w", err)
 	}
 
-	// Build the server environment: same as the parent, except PATH and
-	// HERDR_CONFIG_PATH. FAMILIAR_RUNTIME_BIN is informational for panes and
-	// callback commands.
-	serverEnv := make([]string, 0, len(environ)+3)
+	// Build the server environment: same as the parent, except the runtime-owned
+	// PATH, Herdr config, and mutable Pi profile. FAMILIAR_RUNTIME_BIN is
+	// informational for panes and callback commands.
+	serverEnv := make([]string, 0, len(environ)+4)
 	for _, kv := range environ {
 		key := kv
 		if i := strings.IndexByte(kv, '='); i > 0 {
 			key = kv[:i]
 		}
 		switch key {
-		case "PATH", "HERDR_CONFIG_PATH", "FAMILIAR_RUNTIME_BIN":
+		case "PATH", "HERDR_CONFIG_PATH", "PI_CODING_AGENT_DIR", "FAMILIAR_RUNTIME_BIN":
 			continue
 		}
 		serverEnv = append(serverEnv, kv)
@@ -119,6 +125,7 @@ func PrepareHerdrEnvironment(ctx context.Context, paths Paths, herdr string, env
 	serverEnv = append(serverEnv,
 		"PATH="+store.CurrentBin()+prefixed(env["PATH"]),
 		"HERDR_CONFIG_PATH="+paths.HerdrConfig,
+		"PI_CODING_AGENT_DIR="+paths.PiDir,
 		"FAMILIAR_RUNTIME_BIN="+store.CurrentBin(),
 	)
 	result.Env = serverEnv
@@ -129,6 +136,36 @@ func PrepareHerdrEnvironment(ctx context.Context, paths Paths, herdr string, env
 		}
 	}
 	return result, nil
+}
+
+// writePiProfile copies the public profile shape from the active runtime into
+// writable node-local state. Its extension path uses runtime/current so an
+// ordinary runtime activation updates Pi's code without regenerating the
+// Herdr environment or restarting the server.
+func writePiProfile(paths Paths, store fleetruntime.Store) error {
+	template := filepath.Join(store.Current(), "share", "familiar-worker", "profile", "settings.json")
+	data, err := os.ReadFile(template)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", template, err)
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return fmt.Errorf("parse %s: %w", template, err)
+	}
+	extension := filepath.Join(store.Current(), "share", "familiar-worker", "extensions", "tiamat")
+	if info, err := os.Stat(filepath.Join(extension, "index.ts")); err != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("active runtime does not provide the Tiamat extension at %s", extension)
+	}
+	settings["extensions"] = []string{extension}
+	projected, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return err
+	}
+	projected = append(projected, '\n')
+	if err := os.MkdirAll(paths.PiDir, 0700); err != nil {
+		return err
+	}
+	return atomicWrite(filepath.Join(paths.PiDir, "settings.json"), projected, 0600)
 }
 
 func prefixed(path string) string {
