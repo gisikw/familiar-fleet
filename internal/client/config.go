@@ -46,7 +46,7 @@ func WriteRuntimeConfig(paths Paths, enrollment Enrollment, localUser, herdrPath
 	// replace a configured PATH. Force all controller commands through a tiny
 	// bridge that puts this state-owned pinned Herdr wrapper first.
 	bridge := "#!/bin/sh\n" +
-		"PATH=" + shellQuote(paths.Dir+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin") + "\n" +
+		"PATH=" + shellQuote(paths.Dir) + ":${PATH:-/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}\n" +
 		"export PATH\n" +
 		"test -n \"${SSH_ORIGINAL_COMMAND:-}\" || exit 64\n" +
 		"exec /bin/sh -c \"$SSH_ORIGINAL_COMMAND\"\n"

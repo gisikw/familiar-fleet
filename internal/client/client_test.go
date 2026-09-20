@@ -132,7 +132,7 @@ func TestRuntimeConfigIsLockedDown(t *testing.T) {
 		t.Errorf("wrapper does not pin binary: %s", wrapper)
 	}
 	bridge, _ := os.ReadFile(p.SSHBridge)
-	if !strings.Contains(string(bridge), "PATH='"+p.Dir+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'") ||
+	if !strings.Contains(string(bridge), "PATH='"+p.Dir+"':${PATH:-/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}") ||
 		!strings.Contains(string(bridge), `exec /bin/sh -c "$SSH_ORIGINAL_COMMAND"`) {
 		t.Errorf("SSH bridge does not force the pinned PATH: %s", bridge)
 	}
