@@ -12,7 +12,14 @@
   <key>RunAtLoad</key><true/>
   <!-- The Herdr preflight requires a Tiamat router URL. The token file defaults
        to <state>/secrets/tiamat.token; set FAMILIAR_TIAMAT_TOKEN_FILE to
-       override it. Provision the token out of band; no secret is downloaded. -->
+       override it. Provision the token out of band; no secret is downloaded.
+
+       Each start trues the node up to the runtime Familiar enrolled it to.
+
+       This supervisor owns shutdown: booting this label out stops the named
+       familiar-fleet Herdr server and its session. Use the interactive
+       `familiar-fleet` command instead for a session that outlives its
+       supervisor; `familiar-fleet stop` ends the session explicitly. -->
   <key>EnvironmentVariables</key>
   <dict>
     <key>FAMILIAR_TIAMAT_URL</key><string>https://tiamat.example.com</string>

@@ -7,6 +7,14 @@ Type=simple
 # <state>/secrets/tiamat.token; set FAMILIAR_TIAMAT_TOKEN_FILE to override it.
 # Provision the token out of band; this service never downloads a secret.
 Environment=FAMILIAR_TIAMAT_URL=https://tiamat.example.com
+# Each start trues the node up to the runtime Familiar enrolled it to, so a
+# restart converges on the enrolled runtime without manual intervention.
+#
+# This supervisor owns shutdown: stopping the unit stops the named
+# familiar-fleet Herdr server and its session. Use the interactive
+# `familiar-fleet` command instead if you want a session that outlives the
+# process supervising it. `familiar-fleet stop` ends the session explicitly and
+# works even when configuration is broken.
 ExecStart=%h/.nix-profile/bin/familiar-fleet --state-dir %h/.local/state/familiar-fleet herdr
 Restart=on-failure
 RestartSec=5

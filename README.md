@@ -35,15 +35,9 @@ and nonce values are never persisted. The access token is held in memory only lo
 enough for one `POST <familiar-url>/fleet`; a refresh token in the response is
 ignored.
 
-After connecting, activate a Familiar runtime. This is a one-time prerequisite; the
-Herdr server refuses to start without it rather than falling back to whatever `pi`
-happens to be on the ambient `PATH`:
-
-```sh
-./familiar-fleet runtime apply github:gisikw/familiar/<commit>#familiar-worker-runtime
-```
-
-Then run the interactive experience:
+After connecting, `familiar-fleet` activates the Familiar runtime your deployment
+enrolled this node to. That happens automatically, so there is no second setup
+step:
 
 ```sh
 ./familiar-fleet
@@ -52,16 +46,58 @@ Then run the interactive experience:
 The callback `sshd` and reconnecting tunnel run in the background while the visible
 Herdr TUI attaches to the named `familiar-fleet` session with the terminal's
 stdin/stdout/stderr. Tunnel, `sshd`, and Herdr server operational output goes to the
-state-owned log rather than corrupting the TUI. Intentionally leaving the TUI stops
-this invocation's tunnel and `sshd`, asks Herdr to stop the named server, and cleans
-up remaining children. Herdr's server is launched as a session leader, preserving
-the detached-compatible semantics used by saved machines.
+state-owned log rather than corrupting the TUI.
+
+**Leaving the TUI does not end your work.** It stops this invocation's tunnel and
+callback `sshd`, but the named Herdr server, its session, and any running agents
+stay alive. Run `familiar-fleet` again to bring the tunnel back and reattach to the
+same session; end it deliberately with:
+
+```sh
+./familiar-fleet stop
+```
 
 Running without completed state prints a short instruction to run `connect`.
-Running without an activated runtime prints the exact `runtime apply` command.
 Options, including `--state-dir`, must precede the command.
 
-## Familiar runtime activation
+## The enrolled runtime
+
+Familiar decides which runtime a node runs. Enrollment therefore carries a runtime
+descriptor, and `familiar-fleet` trues the node up to it automatically:
+
+```json
+{"runtime": {"schema": 1, "installable": "github:gisikw/familiar/<40-hex-commit>#familiar-worker-runtime"}}
+```
+
+Validation is strict in both the enrollment response and saved state. The schema
+must be exactly `1`, and the installable must name **one exact, immutable Familiar
+commit**. Branch and tag references such as `main` or `refs/heads/...` are rejected:
+a moving reference would let two identical true-ups silently produce different
+runtimes, which is precisely the property this descriptor exists to prevent.
+
+True-up runs:
+
+- after a successful `connect`, so a freshly connected node is immediately ready;
+- on every normal interactive start; and
+- on every `familiar-fleet herdr` start,
+
+always *before* the Herdr environment is prepared. It builds, validates,
+smoke-tests, GC-roots, and activates the enrolled runtime.
+
+True-up is cheap when it is already satisfied. Each activation records the
+installable and the store path it realized, so a descriptor that matches a recorded
+target which is still a valid runtime skips the build and smoke test entirely.
+Correctness still wins: if the recorded target no longer validates, it is rebuilt
+rather than trusted.
+
+`tunnel`, `stop`, `version`, and the `runtime` admin commands deliberately do not
+true up, because they carry no runtime.
+
+If your state predates this contract, it fails with one concise message naming the
+state file to remove and the `connect` command to re-run. This POC intentionally
+carries no compatibility shim for pre-descriptor state.
+
+## Familiar runtime activation (admin/debug seam)
 
 A *runtime* is an immutable Nix output—normally the flake installable
 `github:gisikw/familiar/<commit>#familiar-worker-runtime`—whose `bin/` provides the
@@ -87,24 +123,33 @@ with an executable `bin/pi`, smoke-runs `bin/pi --version`, then atomically repo
 `current` (temporary symlink + `rename(2)`), first moving the old `current` to
 `previous`. It is idempotent: re-applying the active target changes nothing. A
 failed build, validation, smoke test, or GC-root registration leaves both pointers
-untouched. The active and previous outputs are registered as indirect Nix GC roots;
-older roots are pruned after successful activation. `rollback` swaps the two pointers
+untouched. The active and previous outputs are registered as indirect Nix GC roots
+(only real `/nix/store` outputs can be collected, so only those get roots); older
+roots are pruned after successful activation. `rollback` swaps the two pointers
 and refuses if `previous` is missing or unusable. `status` reports both pointers and
 exits non-zero when nothing usable is active.
+
+**A manual `runtime apply` is an override, not a new authority.** The enrolled
+descriptor remains the source of truth, so the next normal interactive start or
+`familiar-fleet herdr` start reconciles the node back to the enrolled runtime.
+`apply` says so on stderr. Use these commands to debug or to pin a build
+temporarily; use `connect` to change what the node is actually enrolled to run.
 
 Because the Herdr server and every pane reference `<state>/runtime/current/bin`
 rather than a store path, applying a new runtime takes effect in new panes and even
 in existing pane shells immediately. **No Herdr restart is required** for ordinary
 runtime changes. There is no polling daemon, release manifest, or credential
 handling in this slice; `runtime apply` is a narrow, explicit, idempotent step that
-another process may invoke.
+another process may invoke. The one automatic behavior is convergence on the
+enrolled descriptor described above.
 
 ## Herdr pane environment
 
 Before the Familiar-owned Herdr server starts (`familiar-fleet` or
-`familiar-fleet herdr`), a preflight:
+`familiar-fleet herdr`), the node is first trued up to the enrolled runtime (see
+above), and then a preflight:
 
-1. requires a valid `runtime/current` (see above);
+1. requires a valid `runtime/current`, which the true-up has just established;
 2. requires `FAMILIAR_TIAMAT_URL` and a usable Tiamat token file (see below);
 3. resolves the user's shell from `$SHELL` (falling back to `/bin/sh` with a logged
    note; refusing to select the Familiar launcher itself);
@@ -211,6 +256,23 @@ This is secondary compatibility behavior, not an authentication fallback from
 `connect`. `FAMILIAR_FLEET_TOKEN` is also retained for managed test fixtures, but
 must not be placed in a service definition.
 
+### Enrollment response contract
+
+The enrollment response must include the runtime descriptor, which the client
+validates strictly and rejects the whole enrollment without:
+
+```json
+{
+  "runtime": {
+    "schema": 1,
+    "installable": "github:gisikw/familiar/<40-hex-commit>#familiar-worker-runtime"
+  }
+}
+```
+
+Unknown JSON fields are rejected, so the deployment and this client must agree on
+the contract rather than silently diverging.
+
 ### Rendezvous host key
 
 A safe first SSH connection requires trusted rendezvous host-key material. The
@@ -230,9 +292,10 @@ directory.
 ## Commands and lifecycle
 
 ```text
-familiar-fleet                         tunnel + visible Herdr TUI
-familiar-fleet connect <familiar-url>  browser setup and enrollment
-familiar-fleet runtime apply <inst>    build/validate/atomically activate a runtime
+familiar-fleet                         tunnel + visible Herdr TUI (reattaches)
+familiar-fleet connect <familiar-url>  browser setup, enrollment, runtime activation
+familiar-fleet stop                    stop the familiar-fleet Herdr server/session
+familiar-fleet runtime apply <inst>    admin override: build/validate/activate a runtime
 familiar-fleet runtime rollback        swap runtime/current and runtime/previous
 familiar-fleet runtime status          show both pointers and validity
 familiar-fleet herdr                   managed/headless Herdr server only
@@ -240,15 +303,57 @@ familiar-fleet tunnel                  callback sshd + reconnecting tunnel only
 familiar-fleet version                 print version
 ```
 
+### Interactive lifecycle
+
+A plain `familiar-fleet` does three things: it trues the node up to the enrolled
+runtime, ensures the named `familiar-fleet` Herdr server is running, and starts the
+tunnel infrastructure plus the visible TUI.
+
+The Herdr server is **not** owned by the TUI. On a fresh start this invocation
+spawns it as a session leader; if a healthy server for that session is already
+running, the invocation reuses it. That detection is load-bearing rather than an
+optimization, because Herdr refuses to start a second server for a live session.
+A running server whose protocol the pinned CLI reports as incompatible is reported
+as an error telling you to run `familiar-fleet stop`, never silently reused or
+killed.
+
+Leaving the TUI stops the tunnel and callback `sshd` and leaves the Herdr server,
+session, and agents running. Cleanup follows ownership: if the tunnel or the TUI
+fails to start, a server *this* invocation spawned is torn down, but a server it
+merely reused is never terminated.
+
+`familiar-fleet stop` ends the session explicitly and idempotently. It is scoped to
+the `familiar-fleet` session by name, so other Herdr sessions on the machine are
+never inspected or stopped, and stopping something already stopped succeeds. It
+runs **before** the enrollment, runtime, and Tiamat preflights, so it remains a
+working recovery path when configuration is broken.
+
+Because Herdr derives its session socket from `XDG_CONFIG_HOME` (not
+`HERDR_CONFIG_PATH`), run `stop` with the same `XDG_CONFIG_HOME` as the server you
+mean to stop. That is automatic for ordinary interactive use, but worth checking if
+a service unit sets a different one.
+
+### Service semantics
+
 `herdr` and the interactive command run the preflight described above and start the
 Herdr server with `runtime/current/bin` first on `PATH` and the generated
 `HERDR_CONFIG_PATH`; all other environment is inherited from the service that starts
-it. `tunnel` writes operational
-output to the state log and does not launch a TUI or Herdr server. These commands
-are intended to be separate managed services. TERM/INT causes bounded shutdown;
-child process groups receive TERM and then KILL if necessary. An unexpected local
-`sshd` or Herdr server exit fails the owning command so a service manager can
-restart it. Tunnel failures reconnect with bounded, jittered backoff.
+it. `tunnel` writes operational output to the state log and does not launch a TUI or
+Herdr server. These commands are intended to be separate managed services.
+
+**The `herdr` supervisor owns shutdown.** Unlike the interactive command, its
+lifetime *is* the session's lifetime, so TERM from the service manager stops the
+named Herdr server. Leaving an orphaned server that no unit tracks would make
+`systemctl --user stop` and `launchctl bootout` dishonest, and the next start would
+then silently adopt a server the operator believed they had stopped. If a server is
+already running when the service starts, it is adopted rather than duplicated, and
+is still stopped when the service stops. Use the interactive command, not the
+service, when you want a session that outlives the process supervising it.
+
+TERM/INT causes bounded shutdown; child process groups receive TERM and then KILL if
+necessary. An unexpected local `sshd` or Herdr server exit fails the owning command
+so a service manager can restart it. Tunnel failures reconnect with bounded,
+jittered backoff.
 
 `run` remains a cheap alias for the default interactive mode. `enroll` is the debug
 token seam described above.
@@ -271,6 +376,8 @@ The directory is mode `0700`. Important files are:
 - `sshd_host_ed25519`: local callback server host identity;
 - generated `authorized_keys`, `known_hosts`, `sshd_config`, and wrappers;
 - `runtime/current` and `runtime/previous`: symlinks to activated runtimes;
+- `runtime/applied.json`: which installable produced the active runtime, so a
+  repeated true-up to the same descriptor is provably a no-op;
 - `runtime/gcroots/`: registered Nix roots retaining those two runtime outputs;
 - `runtime/pi/`: writable Pi profile projected from the active runtime;
 - `secrets/`: operator-provisioned node-local secrets, mode `0700`; holds
@@ -299,7 +406,8 @@ strict pinned host checking, keepalives, and:
 
 ## Managed services
 
-Connect interactively once and activate a runtime before installing services.
+Connect interactively once before installing services; `connect` also activates the
+enrolled runtime, and each service start trues it up again.
 Provision `<state>/secrets/tiamat.token` and set `FAMILIAR_TIAMAT_URL` in the
 `herdr` unit as well; without both, the Herdr server refuses to start.
 Always choose an explicit,
@@ -345,9 +453,16 @@ the enrolled local user; the rendezvous must independently enforce a tunnel-only
 account and allocated listen port. This POC does not defend against a compromised
 local account, controller, Herdr binary, HTTPS identity boundary, or rendezvous. It
 does not implement remote unenrollment, daemon installation, or automatic host-key
-rotation. Runtime activation trusts whatever the operator passes to `runtime apply`;
-pinning to an exact commit is the caller's responsibility, and the generated pane
+rotation. The enrolled runtime descriptor is trusted as authority from the
+deployment: the client enforces that it names one exact, immutable Familiar commit,
+but a compromised deployment could still enroll a node to a commit of its choosing.
+The manual `runtime apply` seam trusts whatever the operator passes it, and is
+reconciled back to the enrolled runtime on the next normal start. The generated pane
 launcher lives in the owner-only state directory alongside the other wrappers.
+
+Leaving agents running after the TUI exits is a deliberate availability choice with
+a cost: a long-lived Herdr session and its agents survive until something stops
+them, so `familiar-fleet stop` is the intended way to end that exposure.
 
 ## Development
 
@@ -367,6 +482,15 @@ state and token nonce, browser form enrollment, token non-persistence, command
 modes, state selection, strict state permissions, generated SSH configuration,
 process arguments, loopback `sshd`, tunnel reconnect behavior, runtime pointer
 atomicity/idempotency/rollback, Herdr config merging, and pane-launcher generation.
+They also cover the runtime descriptor contract (exact-commit pinning, rejected
+branch refs and schemas, the pre-descriptor migration message), true-up idempotency
+and reconciliation of a manual override, and the Herdr session lifecycle: fresh
+start, reuse of a healthy server, TUI exit leaving the session and its agents
+running, explicit idempotent `stop`, stop leaving unrelated sessions alone, refusal
+to reuse an incompatible server, and cleanup limited to a server the invocation
+spawned. Lifecycle tests drive a stand-in Herdr CLI that models the native
+affordances (a session that outlives the TUI, `status server --json`, `server stop`,
+and refusal to start a second server), so they need no real agents.
 Live launcher tests run each supported shell with a user rc file that deliberately
 shadows `pi`, then check that the rc ran, aliases survive, and `pi` still resolves to
 the runtime; they skip when a shell is absent (the dev shell provides bash, zsh, fish,
