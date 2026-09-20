@@ -42,6 +42,17 @@ func WriteRuntimeConfig(paths Paths, enrollment Enrollment, localUser, herdrPath
 	if err := atomicWrite(paths.HerdrWrapper, []byte(wrapper), 0700); err != nil {
 		return err
 	}
+	// sshd invokes the user's shell for remote commands, and login policy may
+	// replace a configured PATH. Force all controller commands through a tiny
+	// bridge that puts this state-owned pinned Herdr wrapper first.
+	bridge := "#!/bin/sh\n" +
+		"PATH=" + shellQuote(paths.Dir+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin") + "\n" +
+		"export PATH\n" +
+		"test -n \"${SSH_ORIGINAL_COMMAND:-}\" || exit 64\n" +
+		"exec /bin/sh -c \"$SSH_ORIGINAL_COMMAND\"\n"
+	if err := atomicWrite(paths.SSHBridge, []byte(bridge), 0700); err != nil {
+		return err
+	}
 
 	q := sshdQuote
 	config := strings.Join([]string{
@@ -69,7 +80,7 @@ func WriteRuntimeConfig(paths Paths, enrollment Enrollment, localUser, herdrPath
 		"PermitTTY no",
 		"PermitUserEnvironment no",
 		"PermitUserRC no",
-		"SetEnv PATH=" + q(paths.Dir+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"),
+		"ForceCommand " + q(paths.SSHBridge),
 		"LogLevel VERBOSE",
 		"Subsystem sftp internal-sftp",
 		"", // final newline

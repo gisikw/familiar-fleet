@@ -118,7 +118,7 @@ func TestRuntimeConfigIsLockedDown(t *testing.T) {
 		t.Fatal(err)
 	}
 	config := string(b)
-	for _, want := range []string{"ListenAddress 127.0.0.1", "AuthenticationMethods publickey", "PasswordAuthentication no", "AllowTcpForwarding no", "PermitTTY no", "AllowUsers alice", "Port 49152"} {
+	for _, want := range []string{"ListenAddress 127.0.0.1", "AuthenticationMethods publickey", "PasswordAuthentication no", "AllowTcpForwarding no", "PermitTTY no", "AllowUsers alice", "Port 49152", "ForceCommand " + sshdQuote(p.SSHBridge)} {
 		if !strings.Contains(config, want) {
 			t.Errorf("config missing %q", want)
 		}
@@ -130,6 +130,11 @@ func TestRuntimeConfigIsLockedDown(t *testing.T) {
 	wrapper, _ := os.ReadFile(p.HerdrWrapper)
 	if !strings.Contains(string(wrapper), "exec '/opt/herdr bin/herdr'") {
 		t.Errorf("wrapper does not pin binary: %s", wrapper)
+	}
+	bridge, _ := os.ReadFile(p.SSHBridge)
+	if !strings.Contains(string(bridge), "PATH='"+p.Dir+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'") ||
+		!strings.Contains(string(bridge), `exec /bin/sh -c "$SSH_ORIGINAL_COMMAND"`) {
+		t.Errorf("SSH bridge does not force the pinned PATH: %s", bridge)
 	}
 }
 

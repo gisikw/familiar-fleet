@@ -27,8 +27,8 @@ var (
 )
 
 type Paths struct {
-	Dir, State, TunnelKey, TunnelPublicKey, HostKey, HostPublicKey string
-	AuthorizedKeys, KnownHosts, SSHDConfig, SSHDPid, HerdrWrapper  string
+	Dir, State, TunnelKey, TunnelPublicKey, HostKey, HostPublicKey           string
+	AuthorizedKeys, KnownHosts, SSHDConfig, SSHDPid, HerdrWrapper, SSHBridge string
 }
 
 func StatePaths(override string) (Paths, error) {
@@ -57,7 +57,7 @@ func StatePaths(override string) (Paths, error) {
 		HostKey: filepath.Join(abs, "sshd_host_ed25519"), HostPublicKey: filepath.Join(abs, "sshd_host_ed25519.pub"),
 		AuthorizedKeys: filepath.Join(abs, "authorized_keys"), KnownHosts: filepath.Join(abs, "known_hosts"),
 		SSHDConfig: filepath.Join(abs, "sshd_config"), SSHDPid: filepath.Join(abs, "sshd.pid"),
-		HerdrWrapper: filepath.Join(abs, "herdr"),
+		HerdrWrapper: filepath.Join(abs, "herdr"), SSHBridge: filepath.Join(abs, "ssh-bridge"),
 	}, nil
 }
 
