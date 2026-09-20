@@ -18,16 +18,17 @@ so launchd/systemd can restart the complete, known-good process tree.
 ## Prerequisites
 
 - macOS or Linux;
-- Herdr **v0.9.1** (`herdr`), with the saved `--machine` profile reconciled by the
-  Familiar server;
-- OpenSSH `ssh`, `sshd`, and `ssh-keygen`; and
-- Go 1.22+ to build from source.
+- Nix with flakes enabled; and
+- macOS's built-in OpenSSH tools (or OpenSSH on Linux).
+
+The repository pins Herdr **v0.9.1** and wraps the client with both Herdr and
+OpenSSH on `PATH`. After cloning, use the root launcher directly:
 
 ```sh
-go build -trimpath -o familiar-fleet ./cmd/familiar-fleet
-# or enter a development environment (Herdr is installed separately)
-nix develop
+./familiar-fleet version
 ```
+
+For development, `nix develop` provides Go, Herdr 0.9.1, and OpenSSH.
 
 ## First run and enrollment
 
@@ -38,7 +39,7 @@ put it in an owner-only file, and run:
 install -m 600 /dev/null "$HOME/.familiar-enrollment-token"
 printf '%s\n' "$TOKEN" >"$HOME/.familiar-enrollment-token"
 
-familiar-fleet \
+./familiar-fleet \
   --endpoint https://familiar.example.com \
   --token-file "$HOME/.familiar-enrollment-token" \
   --name asgmacbook \
