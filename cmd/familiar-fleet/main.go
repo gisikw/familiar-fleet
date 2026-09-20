@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/signal"
 	"os/user"
-	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -59,7 +58,9 @@ func parseInvocation(args []string, output io.Writer) (invocation, error) {
 	fs.Usage = func() {
 		fmt.Fprintln(fs.Output(), "Usage: familiar-fleet [options] [connect <familiar-url>|runtime <apply|rollback|status>|herdr|tunnel|version]")
 		fmt.Fprintln(fs.Output(), "       familiar-fleet [options]              # tunnel + visible Herdr TUI")
-		fmt.Fprintln(fs.Output(), "\nRuntime activation (required before Herdr starts):")
+		fmt.Fprintln(fs.Output(), "\nThe enrolled runtime is applied automatically on connect and on every")
+		fmt.Fprintln(fs.Output(), "normal or herdr start. These admin seams are for debugging only and are")
+		fmt.Fprintln(fs.Output(), "reconciled back to the enrolled runtime on the next normal start:")
 		fmt.Fprintln(fs.Output(), "       familiar-fleet runtime apply github:gisikw/familiar/<commit>#familiar-worker-runtime")
 		fmt.Fprintln(fs.Output(), "       familiar-fleet runtime apply /nix/store/<hash>-familiar-worker-runtime")
 		fmt.Fprintln(fs.Output(), "       familiar-fleet runtime rollback        # swap runtime/current and runtime/previous")
@@ -167,7 +168,17 @@ func run(args []string) error {
 		Herdr: herdr, Stdin: os.Stdin, TUIOut: os.Stdout, TUIErr: os.Stderr,
 	}
 	if inv.command == "tunnel" {
+		// Tunnel infrastructure carries no runtime, so it deliberately skips the
+		// true-up and the Herdr preflight entirely.
 		return runTunnel(ctx, paths, o, state, runtime)
+	}
+
+	// Converge on the runtime Familiar enrolled this node to before anything is
+	// generated. This is what makes a manual `runtime apply` override temporary:
+	// every normal and herdr start reconciles back to the enrolled authority.
+	trueUp, err := applier(paths, o).TrueUp(ctx, state.Enrollment.Runtime)
+	if err != nil {
+		return err
 	}
 
 	// Preflight: the Familiar-owned Herdr server never starts without an
@@ -180,6 +191,7 @@ func run(args []string) error {
 	if inv.command == "herdr" {
 		runtime.Stdout, runtime.Stderr = os.Stdout, os.Stderr
 		runtime.Logger = log.New(os.Stderr, "familiar-fleet: ", log.LstdFlags)
+		client.LogRuntimeResult(runtime.Logger, trueUp)
 		logHerdrEnv(runtime.Logger, herdrEnv)
 		return runtime.RunHerdr(ctx)
 	}
@@ -201,8 +213,18 @@ func run(args []string) error {
 	runtime.Stdout, runtime.Stderr = logFile, logFile
 	runtime.Logger = log.New(logFile, "familiar-fleet: ", log.LstdFlags)
 	runtime.Logger.Printf("starting node %s (%s)", state.Enrollment.Host, state.Enrollment.NodeID)
+	client.LogRuntimeResult(runtime.Logger, trueUp)
 	logHerdrEnv(runtime.Logger, herdrEnv)
 	return runtime.RunInteractive(ctx)
+}
+
+// applier builds the shared runtime applier. Executable names are resolved
+// lazily inside it, so an already-satisfied true-up never requires Nix.
+func applier(paths client.Paths, o options) client.RuntimeApplier {
+	return client.RuntimeApplier{
+		Paths: paths, Nix: o.nix, NixStore: o.nixStore,
+		Progress: func(message string) { fmt.Fprintln(os.Stderr, message) },
+	}
 }
 
 func runTunnel(ctx context.Context, paths client.Paths, o options, state *client.State, runtime client.Runtime) error {
@@ -258,44 +280,20 @@ func runtimeCommand(ctx context.Context, paths client.Paths, o options, args []s
 		fmt.Printf("runtime/current -> %s\n", target)
 		return nil
 	case "apply":
-		nix := o.nix
-		if !filepath.IsAbs(args[1]) {
-			var err error
-			if nix, err = client.FindBinary(o.nix); err != nil {
-				return err
-			}
-			fmt.Fprintf(os.Stderr, "building %s\n", args[1])
-		}
-		target, err := fleetruntime.Build(ctx, nix, args[1])
+		result, err := applier(paths, o).Apply(ctx, args[1])
 		if err != nil {
 			return err
 		}
-		if err := fleetruntime.Validate(target); err != nil {
-			return err
-		}
-		if err := fleetruntime.Smoke(ctx, target); err != nil {
-			return fmt.Errorf("runtime failed validation; not activated: %w", err)
-		}
-		nixStore, err := client.FindBinary(o.nixStore)
-		if err != nil {
-			return err
-		}
-		if err := store.RegisterGCRoot(ctx, nixStore, target); err != nil {
-			return fmt.Errorf("retain runtime: %w", err)
-		}
-		changed, err := store.Activate(target)
-		if err != nil {
-			return err
-		}
-		if err := store.PruneGCRoots(); err != nil {
-			return fmt.Errorf("runtime activated, but pruning old GC roots failed: %w", err)
-		}
-		if changed {
-			fmt.Printf("activated runtime/current -> %s\n", target)
+		switch {
+		case result.Skipped:
+			fmt.Printf("runtime/current already -> %s\n", result.Target)
+		case result.Changed:
+			fmt.Printf("activated runtime/current -> %s\n", result.Target)
 			fmt.Println("new Herdr panes use it immediately; no restart required")
-		} else {
-			fmt.Printf("runtime/current already -> %s\n", target)
+		default:
+			fmt.Printf("runtime/current already -> %s\n", result.Target)
 		}
+		fmt.Fprintln(os.Stderr, "note: this is an admin override; the next normal or herdr start reconciles to the enrolled runtime")
 		return nil
 	}
 	return fmt.Errorf("unknown runtime subcommand %q", args[0])
@@ -368,7 +366,17 @@ func connect(ctx context.Context, paths client.Paths, o options, rawEndpoint str
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "Connected as %s (node %s). Run familiar-fleet to begin.\n", enrollment.Host, enrollment.NodeID)
+	fmt.Fprintf(os.Stderr, "Connected as %s (node %s).\n", enrollment.Host, enrollment.NodeID)
+	// Requirement: a successful connect leaves the node ready to run. Build,
+	// validate, smoke, GC-root, and activate the enrolled runtime now, so the
+	// first `familiar-fleet` is not a second manual setup step.
+	fmt.Fprintln(os.Stderr, "Activating the enrolled Familiar runtime…")
+	result, err := applier(paths, o).TrueUp(ctx, enrollment.Runtime)
+	if err != nil {
+		return fmt.Errorf("enrollment saved, but activating the enrolled runtime failed: %w", err)
+	}
+	fmt.Fprintf(os.Stderr, "Runtime ready: %s\n", result.Target)
+	fmt.Fprintln(os.Stderr, "Run familiar-fleet to begin.")
 	return nil
 }
 

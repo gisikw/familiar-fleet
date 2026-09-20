@@ -25,8 +25,10 @@ func testKey(seed byte) string {
 	return "ssh-ed25519 " + base64.StdEncoding.EncodeToString(blob) + " test-" + string(rune(seed))
 }
 
+const testInstallable = "github:gisikw/familiar/0123456789abcdef0123456789abcdef01234567#familiar-worker-runtime"
+
 func validEnrollment() Enrollment {
-	return Enrollment{NodeID: "node-1", Host: "mac-1", Port: 22001, TunnelHost: "rendezvous.example.com", TunnelSSHPort: 2222, TunnelUser: "tunnel", RemoteSession: "familiar-fleet", ControllerPublicKey: testKey('c'), TunnelHostKey: testKey('h')}
+	return Enrollment{NodeID: "node-1", Host: "mac-1", Port: 22001, TunnelHost: "rendezvous.example.com", TunnelSSHPort: 2222, TunnelUser: "tunnel", RemoteSession: "familiar-fleet", ControllerPublicKey: testKey('c'), TunnelHostKey: testKey('h'), Runtime: RuntimeDescriptor{Schema: 1, Installable: testInstallable}}
 }
 
 func TestStateRoundTripAndPermissions(t *testing.T) {

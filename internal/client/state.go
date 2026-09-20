@@ -112,6 +112,9 @@ type Enrollment struct {
 	TunnelUser          string `json:"tunnel_user"`
 	RemoteSession       string `json:"remote_session"`
 	ControllerPublicKey string `json:"controller_public_key"`
+	// Runtime is the required authority statement naming the exact Familiar
+	// runtime this node must converge on. See RuntimeDescriptor.
+	Runtime RuntimeDescriptor `json:"runtime"`
 	// Optional contract extension. If omitted, the same value must be supplied out of band.
 	TunnelHostKey string `json:"tunnel_host_key,omitempty"`
 }
@@ -180,6 +183,11 @@ func LoadState(path string) (*State, error) {
 		return nil, errors.New("invalid saved SSH user")
 	}
 	if err := ValidateEnrollment(s.Enrollment); err != nil {
+		if errors.Is(err, ErrNoRuntimeDescriptor) {
+			// One concise migration message. This POC deliberately does not
+			// carry compatibility shims for pre-descriptor state.
+			return nil, fmt.Errorf("saved enrollment predates the runtime descriptor contract; remove %s and re-run: familiar-fleet connect %s", path, s.Endpoint)
+		}
 		return nil, fmt.Errorf("invalid saved enrollment: %w", err)
 	}
 	return &s, nil
@@ -289,6 +297,12 @@ func ValidateEnrollment(e Enrollment) error {
 	}
 	if err := validatePublicKey(e.ControllerPublicKey); err != nil {
 		return fmt.Errorf("controller public key: %w", err)
+	}
+	if err := e.Runtime.Validate(); err != nil {
+		if errors.Is(err, ErrNoRuntimeDescriptor) {
+			return err
+		}
+		return fmt.Errorf("runtime descriptor: %w", err)
 	}
 	if e.TunnelHostKey != "" {
 		if err := validatePublicKey(e.TunnelHostKey); err != nil {

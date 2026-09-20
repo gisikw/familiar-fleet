@@ -14,6 +14,7 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -28,6 +29,10 @@ const (
 	PreviousName = "previous"
 	// RequiredTool is the executable a runtime must provide to be activatable.
 	RequiredTool = "pi"
+	// AppliedName records which installable produced the active runtime, so a
+	// repeated true-up to the same descriptor can be proven a no-op without
+	// re-evaluating or rebuilding it.
+	AppliedName = "applied.json"
 )
 
 // Store is the node-local runtime pointer directory.
@@ -39,8 +44,65 @@ func (s Store) Current() string  { return filepath.Join(s.Dir, CurrentName) }
 func (s Store) Previous() string { return filepath.Join(s.Dir, PreviousName) }
 
 // CurrentBin is the stable PATH entry that Herdr and pane shells reference.
-func (s Store) CurrentBin() string { return filepath.Join(s.Current(), "bin") }
-func (s Store) GCRoots() string    { return filepath.Join(s.Dir, "gcroots") }
+func (s Store) CurrentBin() string  { return filepath.Join(s.Current(), "bin") }
+func (s Store) GCRoots() string     { return filepath.Join(s.Dir, "gcroots") }
+func (s Store) AppliedPath() string { return filepath.Join(s.Dir, AppliedName) }
+
+// AppliedRecord is the provenance of the active runtime: the installable that
+// was realized and the store path it realized to.
+type AppliedRecord struct {
+	Installable string `json:"installable"`
+	Target      string `json:"target"`
+}
+
+// Applied returns the recorded provenance. A missing record is reported as an
+// empty record with ok=false rather than an error, because a node that was
+// activated by an older client simply has no provenance yet.
+func (s Store) Applied() (AppliedRecord, bool) {
+	b, err := os.ReadFile(s.AppliedPath())
+	if err != nil {
+		return AppliedRecord{}, false
+	}
+	var record AppliedRecord
+	if err := json.Unmarshal(b, &record); err != nil {
+		return AppliedRecord{}, false
+	}
+	if record.Installable == "" || record.Target == "" {
+		return AppliedRecord{}, false
+	}
+	return record, true
+}
+
+// RecordApplied stores the provenance of a successful activation.
+func (s Store) RecordApplied(record AppliedRecord) error {
+	if err := os.MkdirAll(s.Dir, 0700); err != nil {
+		return err
+	}
+	b, err := json.MarshalIndent(record, "", "  ")
+	if err != nil {
+		return err
+	}
+	b = append(b, '\n')
+	f, err := os.CreateTemp(s.Dir, ".tmp-applied-*")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	defer os.Remove(name)
+	if err = f.Chmod(0600); err == nil {
+		_, err = f.Write(b)
+	}
+	if err == nil {
+		err = f.Sync()
+	}
+	if closeErr := f.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Rename(name, s.AppliedPath())
+}
 
 // ErrNoRuntime reports that no runtime has been activated on this node.
 var ErrNoRuntime = errors.New("no Familiar runtime is activated")
@@ -214,6 +276,13 @@ func replaceSymlink(link, target string) error {
 		return err
 	}
 	return os.Rename(tmpLink, link)
+}
+
+// IsStorePath reports whether target is an immutable Nix store output, and so
+// whether Nix garbage collection is something that must be defended against
+// with a GC root.
+func IsStorePath(target string) bool {
+	return filepath.Dir(filepath.Clean(target)) == "/nix/store"
 }
 
 // RegisterGCRoot asks Nix to retain target through an indirect root beneath
