@@ -32,6 +32,10 @@ var (
 type Paths struct {
 	Dir, State, Log, TunnelKey, TunnelPublicKey, HostKey, HostPublicKey      string
 	AuthorizedKeys, KnownHosts, SSHDConfig, SSHDPid, HerdrWrapper, SSHBridge string
+	// RuntimeDir holds the stable runtime/current and runtime/previous pointers.
+	// PaneShell is the generated Herdr default_shell launcher; HerdrConfig is the
+	// generated HERDR_CONFIG_PATH for the Familiar-owned server.
+	RuntimeDir, PaneShell, HerdrConfig string
 }
 
 // ResolveStateDir implements the deterministic state-location precedence used
@@ -70,8 +74,8 @@ func StatePaths(override string) (Paths, error) {
 	if err != nil {
 		return Paths{}, err
 	}
-	if strings.ContainsRune(abs, ':') || strings.IndexFunc(abs, unicode.IsControl) >= 0 {
-		return Paths{}, errors.New("state directory must not contain a colon or control character")
+	if strings.ContainsAny(abs, ":'") || strings.IndexFunc(abs, unicode.IsControl) >= 0 {
+		return Paths{}, errors.New("state directory must not contain a colon, single quote, or control character")
 	}
 	return Paths{
 		Dir: abs, State: filepath.Join(abs, "state.json"), Log: filepath.Join(abs, "familiar-fleet.log"),
@@ -80,6 +84,8 @@ func StatePaths(override string) (Paths, error) {
 		AuthorizedKeys: filepath.Join(abs, "authorized_keys"), KnownHosts: filepath.Join(abs, "known_hosts"),
 		SSHDConfig: filepath.Join(abs, "sshd_config"), SSHDPid: filepath.Join(abs, "sshd.pid"),
 		HerdrWrapper: filepath.Join(abs, "herdr"), SSHBridge: filepath.Join(abs, "ssh-bridge"),
+		RuntimeDir: filepath.Join(abs, "runtime"), PaneShell: filepath.Join(abs, "pane-shell"),
+		HerdrConfig: filepath.Join(abs, "herdr-config.toml"),
 	}, nil
 }
 

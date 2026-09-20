@@ -25,10 +25,14 @@ type Runtime struct {
 	Enrollment       Enrollment
 	LocalUser        string
 	Herdr, SSH, SSHD string
-	Stdin            io.Reader
-	Stdout, Stderr   io.Writer // operational child output (normally the state log)
-	Logger           *log.Logger
-	TUIOut, TUIErr   io.Writer
+	// HerdrEnv is the complete environment for the Familiar-owned Herdr server:
+	// runtime/current/bin first on PATH and HERDR_CONFIG_PATH set to the
+	// generated configuration. See PrepareHerdrEnvironment.
+	HerdrEnv       []string
+	Stdin          io.Reader
+	Stdout, Stderr io.Writer // operational child output (normally the state log)
+	Logger         *log.Logger
+	TUIOut, TUIErr io.Writer
 }
 
 type child struct {
@@ -39,24 +43,25 @@ type child struct {
 }
 
 func startChild(path string, args []string, stdin io.Reader, stdout, stderr io.Writer) (*child, error) {
-	return startChildWithAttrs(path, args, stdin, stdout, stderr, &syscall.SysProcAttr{Setpgid: true}, true)
+	return startChildWithAttrs(path, args, stdin, stdout, stderr, nil, &syscall.SysProcAttr{Setpgid: true}, true)
 }
 
 func startForegroundChild(path string, args []string, stdin io.Reader, stdout, stderr io.Writer) (*child, error) {
 	// Inherit the parent's foreground process group. Putting a TUI that reads
 	// the controlling terminal in a new, non-foreground group causes SIGTTIN.
-	return startChildWithAttrs(path, args, stdin, stdout, stderr, nil, false)
+	return startChildWithAttrs(path, args, stdin, stdout, stderr, nil, nil, false)
 }
 
-func startDetachedChild(path string, args []string, stdout, stderr io.Writer) (*child, error) {
+func startDetachedChild(path string, args []string, env []string, stdout, stderr io.Writer) (*child, error) {
 	// Herdr requires its server process to be a session leader, matching its own
 	// auto-spawn behavior and preserving sessions used by saved machines.
-	return startChildWithAttrs(path, args, nil, stdout, stderr, &syscall.SysProcAttr{Setsid: true}, true)
+	return startChildWithAttrs(path, args, nil, stdout, stderr, env, &syscall.SysProcAttr{Setsid: true}, true)
 }
 
-func startChildWithAttrs(path string, args []string, stdin io.Reader, stdout, stderr io.Writer, attrs *syscall.SysProcAttr, processGroup bool) (*child, error) {
+func startChildWithAttrs(path string, args []string, stdin io.Reader, stdout, stderr io.Writer, env []string, attrs *syscall.SysProcAttr, processGroup bool) (*child, error) {
 	cmd := exec.Command(path, args...)
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = stdout, stderr, stdin
+	cmd.Env = env
 	cmd.SysProcAttr = attrs
 	if err := cmd.Start(); err != nil {
 		return nil, err
@@ -164,7 +169,9 @@ func (r Runtime) waitHerdrReady(ctx context.Context, server *child) error {
 	defer ticker.Stop()
 	for {
 		probeCtx, cancel := context.WithTimeout(ctx, time.Second)
-		output, _ := exec.CommandContext(probeCtx, r.Herdr, "--session", herdrSession, "status", "server", "--json").Output()
+		probe := exec.CommandContext(probeCtx, r.Herdr, "--session", herdrSession, "status", "server", "--json")
+		probe.Env = r.HerdrEnv
+		output, _ := probe.Output()
 		cancel()
 		if strings.Contains(string(output), `"running":true`) {
 			return nil
@@ -201,6 +208,7 @@ func (r Runtime) stopHerdrServer() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, r.Herdr, HerdrStopArgs()...)
+	cmd.Env = r.HerdrEnv
 	cmd.Stdout, cmd.Stderr = r.Stdout, r.Stderr
 	if err := cmd.Run(); err != nil {
 		r.Logger.Printf("stopping Herdr session: %v", err)
@@ -221,7 +229,7 @@ func (r Runtime) RunInteractive(ctx context.Context) error {
 		<-tunnelDone
 	}()
 
-	server, err := startDetachedChild(r.Herdr, HerdrServerArgs(), r.Stdout, r.Stderr)
+	server, err := startDetachedChild(r.Herdr, HerdrServerArgs(), r.HerdrEnv, r.Stdout, r.Stderr)
 	if err != nil {
 		return fmt.Errorf("start Herdr server: %w", err)
 	}
@@ -259,10 +267,11 @@ func (r Runtime) RunInteractive(ctx context.Context) error {
 	return result
 }
 
-// RunHerdr is the managed-service/headless Herdr component. The child inherits
-// the caller's complete environment, including PATH used for spawned terminals.
+// RunHerdr is the managed-service/headless Herdr component. The server runs
+// with HerdrEnv (runtime/current/bin first on PATH, generated
+// HERDR_CONFIG_PATH), so terminals spawned by Herdr see that environment.
 func (r Runtime) RunHerdr(ctx context.Context) error {
-	server, err := startDetachedChild(r.Herdr, HerdrServerArgs(), r.Stdout, r.Stderr)
+	server, err := startDetachedChild(r.Herdr, HerdrServerArgs(), r.HerdrEnv, r.Stdout, r.Stderr)
 	if err != nil {
 		return fmt.Errorf("start Herdr server: %w", err)
 	}
