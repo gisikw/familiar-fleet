@@ -228,6 +228,8 @@ func runTunnel(ctx context.Context, paths client.Paths, o options, state *client
 
 func logHerdrEnv(logger *log.Logger, env client.HerdrEnvironment) {
 	logger.Printf("Familiar runtime %s; pane shell adapts around %s", env.Runtime, env.UserShell)
+	// Path and URL only: the token value is never read by this process.
+	logger.Printf("Tiamat router %s; token file %s", env.Tiamat.URL, env.Tiamat.TokenFile)
 	for _, note := range env.Notes {
 		logger.Printf("note: %s", note)
 	}

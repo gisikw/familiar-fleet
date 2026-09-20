@@ -20,6 +20,9 @@ type HerdrEnvironment struct {
 	Runtime string
 	// UserShell is the shell the pane launcher adapts around.
 	UserShell string
+	// Tiamat is the validated router URL and token file path. The token value
+	// itself is never loaded, logged, or stored.
+	Tiamat TiamatPreflight
 	// Notes are non-fatal observations worth logging (e.g. SHELL unset).
 	Notes []string
 	// Env is the complete environment for the Familiar-owned Herdr server.
@@ -52,14 +55,16 @@ func environMap(environ []string) map[string]string {
 // Familiar-owned Herdr server starts. It:
 //
 //  1. requires an activated, valid runtime/current (no ambient pi fallback);
-//  2. resolves the user's shell from the parent environment;
-//  3. regenerates the pane launcher and its rc files;
-//  4. projects the runtime's public Pi profile into mutable node-local state;
-//  5. writes the generated Herdr config (user's config.toml plus Familiar's
+//  2. requires a Tiamat router URL and an existing, readable token file,
+//     resolving the latter to <state>/secrets/tiamat.token by default;
+//  3. resolves the user's shell from the parent environment;
+//  4. regenerates the pane launcher and its rc files;
+//  5. projects the runtime's public Pi profile into mutable node-local state;
+//  6. writes the generated Herdr config (user's config.toml plus Familiar's
 //     [terminal] table) and validates it with `herdr config check`;
-//  6. returns the server environment with runtime/current/bin first on PATH,
-//     PI_CODING_AGENT_DIR set to that profile, and HERDR_CONFIG_PATH pointing
-//     at the generated file.
+//  7. returns the server environment with runtime/current/bin first on PATH,
+//     PI_CODING_AGENT_DIR set to that profile, HERDR_CONFIG_PATH pointing
+//     at the generated file, and the resolved Tiamat URL and token path.
 //
 // Because PATH references the stable pointer, later `runtime apply` runs
 // take effect in new panes without restarting Herdr.
@@ -73,6 +78,14 @@ func PrepareHerdrEnvironment(ctx context.Context, paths Paths, herdr string, env
 		return result, err
 	}
 	result.Runtime = current
+
+	// Validate Tiamat before anything is generated so a misconfigured node
+	// fails loudly and without side effects.
+	tiamat, err := ResolveTiamat(paths, env)
+	if err != nil {
+		return result, err
+	}
+	result.Tiamat = tiamat
 
 	shell, note, err := ResolveUserShell(env["SHELL"], paths)
 	if err != nil {
@@ -108,16 +121,16 @@ func PrepareHerdrEnvironment(ctx context.Context, paths Paths, herdr string, env
 	}
 
 	// Build the server environment: same as the parent, except the runtime-owned
-	// PATH, Herdr config, and mutable Pi profile. FAMILIAR_RUNTIME_BIN is
-	// informational for panes and callback commands.
-	serverEnv := make([]string, 0, len(environ)+4)
+	// PATH, Herdr config, mutable Pi profile, and preflighted Tiamat values.
+	// FAMILIAR_RUNTIME_BIN is informational for panes and callback commands.
+	serverEnv := make([]string, 0, len(environ)+6)
 	for _, kv := range environ {
 		key := kv
 		if i := strings.IndexByte(kv, '='); i > 0 {
 			key = kv[:i]
 		}
 		switch key {
-		case "PATH", "HERDR_CONFIG_PATH", "PI_CODING_AGENT_DIR", "FAMILIAR_RUNTIME_BIN":
+		case "PATH", "HERDR_CONFIG_PATH", "PI_CODING_AGENT_DIR", "FAMILIAR_RUNTIME_BIN", TiamatURLEnv, TiamatTokenFileEnv:
 			continue
 		}
 		serverEnv = append(serverEnv, kv)
@@ -127,6 +140,8 @@ func PrepareHerdrEnvironment(ctx context.Context, paths Paths, herdr string, env
 		"HERDR_CONFIG_PATH="+paths.HerdrConfig,
 		"PI_CODING_AGENT_DIR="+paths.PiDir,
 		"FAMILIAR_RUNTIME_BIN="+store.CurrentBin(),
+		TiamatURLEnv+"="+tiamat.URL,
+		TiamatTokenFileEnv+"="+tiamat.TokenFile,
 	)
 	result.Env = serverEnv
 

@@ -77,6 +77,7 @@ func TestPrepareHerdrEnvironmentBuildsServerEnv(t *testing.T) {
 	if _, err := fleetruntime.New(p.RuntimeDir).Activate(rt); err != nil {
 		t.Fatal(err)
 	}
+	writeToken(t, p.TiamatTokenFile, secretValue)
 	// User Herdr config that must be preserved.
 	if err := os.MkdirAll(filepath.Join(home, ".config", "herdr"), 0700); err != nil {
 		t.Fatal(err)
@@ -88,7 +89,7 @@ func TestPrepareHerdrEnvironmentBuildsServerEnv(t *testing.T) {
 	// A parent HERDR_CONFIG_PATH is the user's source config; the server gets
 	// the generated one instead.
 	userCfg := filepath.Join(home, ".config", "herdr", "config.toml")
-	environ := []string{"SHELL=/bin/sh", "HOME=" + home, "PATH=/usr/bin:/bin", "HERDR_CONFIG_PATH=" + userCfg, "FAMILIAR_RUNTIME_BIN=stale", "TERM=xterm"}
+	environ := []string{"SHELL=/bin/sh", "HOME=" + home, "PATH=/usr/bin:/bin", "HERDR_CONFIG_PATH=" + userCfg, "FAMILIAR_RUNTIME_BIN=stale", "TERM=xterm", TiamatURLEnv + "=https://tiamat.internal"}
 	got, err := PrepareHerdrEnvironment(context.Background(), p, herdr, environ)
 	if err != nil {
 		t.Fatal(err)
@@ -143,11 +144,143 @@ func TestPrepareHerdrEnvironmentBuildsServerEnv(t *testing.T) {
 	}
 
 	// SHELL unset produces a note, not an error; SHELL pointing at the launcher is an error.
-	got, err = PrepareHerdrEnvironment(context.Background(), p, herdr, []string{"HOME=" + home, "PATH=/bin"})
+	got, err = PrepareHerdrEnvironment(context.Background(), p, herdr, []string{"HOME=" + home, "PATH=/bin", TiamatURLEnv + "=https://tiamat.internal"})
 	if err != nil || got.UserShell != "/bin/sh" || len(got.Notes) != 1 {
 		t.Fatalf("unset SHELL: %+v %v", got, err)
 	}
-	if _, err := PrepareHerdrEnvironment(context.Background(), p, herdr, []string{"SHELL=" + p.PaneShell, "HOME=" + home, "PATH=/bin"}); err == nil {
+	if _, err := PrepareHerdrEnvironment(context.Background(), p, herdr, []string{"SHELL=" + p.PaneShell, "HOME=" + home, "PATH=/bin", TiamatURLEnv + "=https://tiamat.internal"}); err == nil {
 		t.Fatal("SHELL=launcher must be rejected (recursion)")
+	}
+}
+
+// activateTestRuntime builds a minimal valid runtime and points
+// runtime/current at it.
+func activateTestRuntime(t *testing.T, p Paths) string {
+	t.Helper()
+	rt := filepath.Join(t.TempDir(), "familiar-worker-runtime")
+	if err := os.MkdirAll(filepath.Join(rt, "bin"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rt, "bin", "pi"), []byte("#!/bin/sh\necho pi\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	profile := filepath.Join(rt, "share", "familiar-worker", "profile")
+	extension := filepath.Join(rt, "share", "familiar-worker", "extensions", "tiamat")
+	if err := os.MkdirAll(profile, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(extension, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(profile, "settings.json"), []byte(`{"extensions":["/nix/store/old"]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(extension, "index.ts"), []byte("export {};\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fleetruntime.New(p.RuntimeDir).Activate(rt); err != nil {
+		t.Fatal(err)
+	}
+	return rt
+}
+
+// The Herdr server must not start without a Tiamat URL, and nothing may be
+// generated when the preflight fails.
+func TestPrepareHerdrEnvironmentRequiresTiamatURL(t *testing.T) {
+	p := testPaths(t)
+	activateTestRuntime(t, p)
+	writeToken(t, p.TiamatTokenFile, secretValue)
+
+	_, err := PrepareHerdrEnvironment(context.Background(), p, fakeHerdr(t, true),
+		[]string{"SHELL=/bin/sh", "HOME=" + t.TempDir(), "PATH=/usr/bin:/bin"})
+	if err == nil || !strings.Contains(err.Error(), TiamatURLEnv) {
+		t.Fatalf("expected missing-URL error, got %v", err)
+	}
+	if _, statErr := os.Stat(p.PaneShell); !os.IsNotExist(statErr) {
+		t.Fatal("launcher must not be generated when Tiamat preflight fails")
+	}
+	if _, statErr := os.Stat(p.HerdrConfig); !os.IsNotExist(statErr) {
+		t.Fatal("config must not be generated when Tiamat preflight fails")
+	}
+}
+
+func TestPrepareHerdrEnvironmentRequiresTiamatToken(t *testing.T) {
+	p := testPaths(t)
+	activateTestRuntime(t, p)
+	// No token file provisioned at the deterministic default path.
+
+	_, err := PrepareHerdrEnvironment(context.Background(), p, fakeHerdr(t, true),
+		[]string{"SHELL=/bin/sh", "HOME=" + t.TempDir(), "PATH=/usr/bin:/bin", TiamatURLEnv + "=https://tiamat.internal"})
+	if err == nil || !strings.Contains(err.Error(), p.TiamatTokenFile) {
+		t.Fatalf("expected missing-token error naming the default path, got %v", err)
+	}
+}
+
+// Normal Herdr agent starts inherit the preflighted Tiamat values, and the
+// token value never appears anywhere in the exported environment.
+func TestPrepareHerdrEnvironmentExportsTiamat(t *testing.T) {
+	p := testPaths(t)
+	activateTestRuntime(t, p)
+	writeToken(t, p.TiamatTokenFile, secretValue)
+	home := t.TempDir()
+
+	got, err := PrepareHerdrEnvironment(context.Background(), p, fakeHerdr(t, true), []string{
+		"SHELL=/bin/sh", "HOME=" + home, "PATH=/usr/bin:/bin",
+		TiamatURLEnv + "=https://tiamat.internal",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env := environMap(got.Env)
+	if env[TiamatURLEnv] != "https://tiamat.internal" {
+		t.Errorf("%s=%q", TiamatURLEnv, env[TiamatURLEnv])
+	}
+	if env[TiamatTokenFileEnv] != p.TiamatTokenFile {
+		t.Errorf("%s=%q, want the deterministic default %q", TiamatTokenFileEnv, env[TiamatTokenFileEnv], p.TiamatTokenFile)
+	}
+	if got.Tiamat.URL != "https://tiamat.internal" || got.Tiamat.TokenFile != p.TiamatTokenFile {
+		t.Errorf("%+v", got.Tiamat)
+	}
+	// Exactly one entry per variable, so the value is unambiguous to Herdr.
+	var urls, files int
+	for _, kv := range got.Env {
+		switch {
+		case strings.HasPrefix(kv, TiamatURLEnv+"="):
+			urls++
+		case strings.HasPrefix(kv, TiamatTokenFileEnv+"="):
+			files++
+		}
+		if strings.Contains(kv, secretValue) {
+			t.Fatal("token contents leaked into the Herdr environment")
+		}
+	}
+	if urls != 1 || files != 1 {
+		t.Errorf("duplicate Tiamat entries: urls=%d files=%d", urls, files)
+	}
+	for _, note := range got.Notes {
+		if strings.Contains(note, secretValue) {
+			t.Fatal("token contents leaked into notes")
+		}
+	}
+}
+
+// An explicit token path from the service environment is preserved rather
+// than replaced by the default.
+func TestPrepareHerdrEnvironmentPreservesExplicitTokenPath(t *testing.T) {
+	p := testPaths(t)
+	activateTestRuntime(t, p)
+	explicit := filepath.Join(t.TempDir(), "provisioned.token")
+	writeToken(t, explicit, "dummy\n")
+
+	got, err := PrepareHerdrEnvironment(context.Background(), p, fakeHerdr(t, true), []string{
+		"SHELL=/bin/sh", "HOME=" + t.TempDir(), "PATH=/usr/bin:/bin",
+		TiamatURLEnv + "=https://tiamat.internal",
+		TiamatTokenFileEnv + "=" + explicit,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if env := environMap(got.Env); env[TiamatTokenFileEnv] != explicit {
+		t.Errorf("%s=%q, want %q", TiamatTokenFileEnv, env[TiamatTokenFileEnv], explicit)
 	}
 }
