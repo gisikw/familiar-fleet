@@ -1,0 +1,19 @@
+[Unit]
+Description=Familiar Fleet client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/familiar-fleet run
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=20
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/familiar-fleet
+
+[Install]
+WantedBy=default.target
