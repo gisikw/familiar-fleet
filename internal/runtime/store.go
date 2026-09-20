@@ -136,18 +136,54 @@ func Validate(target string) error {
 }
 
 // Smoke runs the required tool with --version under a short timeout so a
-// runtime that cannot even start is never activated.
+// runtime that cannot even start is never activated. The Familiar worker's Pi
+// wrapper deliberately fails closed without Tiamat configuration, including
+// for --version, so smoke with inert credentials rather than depending on or
+// exposing deployment secrets.
 func Smoke(ctx context.Context, target string) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
+
+	token, err := os.CreateTemp("", "familiar-fleet-smoke-token-*")
+	if err != nil {
+		return fmt.Errorf("create smoke-test token: %w", err)
+	}
+	tokenPath := token.Name()
+	defer os.Remove(tokenPath)
+	if _, err := token.WriteString("smoke-only\n"); err != nil {
+		token.Close()
+		return fmt.Errorf("write smoke-test token: %w", err)
+	}
+	if err := token.Close(); err != nil {
+		return fmt.Errorf("close smoke-test token: %w", err)
+	}
+
 	tool := filepath.Join(target, "bin", RequiredTool)
 	cmd := exec.CommandContext(ctx, tool, "--version")
-	cmd.Env = append(os.Environ(), "PATH="+filepath.Join(target, "bin")+":"+os.Getenv("PATH"))
+	cmd.Env = smokeEnv(os.Environ(), map[string]string{
+		"PATH":                       filepath.Join(target, "bin") + ":" + os.Getenv("PATH"),
+		"FAMILIAR_TIAMAT_URL":        "http://127.0.0.1",
+		"FAMILIAR_TIAMAT_TOKEN_FILE": tokenPath,
+	})
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s --version failed: %w: %s", tool, err, strings.TrimSpace(string(out)))
 	}
 	return nil
+}
+
+func smokeEnv(environ []string, overrides map[string]string) []string {
+	result := make([]string, 0, len(environ)+len(overrides))
+	for _, entry := range environ {
+		key, _, _ := strings.Cut(entry, "=")
+		if _, replaced := overrides[key]; !replaced {
+			result = append(result, entry)
+		}
+	}
+	for key, value := range overrides {
+		result = append(result, key+"="+value)
+	}
+	return result
 }
 
 // Pointer reads one pointer. It returns ErrNoRuntime when the pointer does not

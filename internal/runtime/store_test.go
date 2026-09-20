@@ -283,3 +283,33 @@ func TestSmokeRunsRequiredTool(t *testing.T) {
 		t.Fatalf("smoke bad: %v", err)
 	}
 }
+
+func TestSmokeSuppliesInertTiamatConfiguration(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell-script runtime")
+	}
+	dir := fakeRuntime(t, "guarded", false)
+	captured := filepath.Join(dir, "smoke-token-path")
+	script := "#!/bin/sh\n" +
+		"[ \"$FAMILIAR_TIAMAT_URL\" = http://127.0.0.1 ] || exit 4\n" +
+		"[ -s \"$FAMILIAR_TIAMAT_TOKEN_FILE\" ] || exit 5\n" +
+		"printf '%s' \"$FAMILIAR_TIAMAT_TOKEN_FILE\" >" + captured + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "bin", "pi"), []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FAMILIAR_TIAMAT_URL", "https://real.example.invalid")
+	t.Setenv("FAMILIAR_TIAMAT_TOKEN_FILE", "/real/secret/must-not-be-used")
+	if err := Smoke(context.Background(), dir); err != nil {
+		t.Fatalf("smoke guarded runtime: %v", err)
+	}
+	tokenPath, err := os.ReadFile(captured)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(tokenPath) == "/real/secret/must-not-be-used" {
+		t.Fatal("smoke exposed the deployment token path")
+	}
+	if _, err := os.Stat(string(tokenPath)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("temporary smoke token was not removed: %v", err)
+	}
+}
