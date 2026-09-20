@@ -258,6 +258,17 @@ func (r Runtime) ensureHerdrServer(ctx context.Context) (herdrServer, error) {
 	return herdrServer{child: server, spawned: true}, nil
 }
 
+// cleanup tears down a server this invocation spawned, and does nothing for one
+// it reused. The graceful native stop comes first so Herdr removes its own
+// socket and session state; the process-group stop is the backstop.
+func (r Runtime) cleanup(server herdrServer) {
+	if !server.spawned {
+		return
+	}
+	r.stopHerdrServer()
+	server.child.stop(10 * time.Second)
+}
+
 // RunInteractive owns one visible invocation: it ensures the named Herdr
 // server exists (reusing a healthy one), starts the callback sshd and reverse
 // tunnel, and attaches the visible TUI.
@@ -276,9 +287,7 @@ func (r Runtime) RunInteractive(ctx context.Context) error {
 	if err != nil {
 		// The tunnel never came up, so this invocation accomplished nothing;
 		// a server we just spawned would be an orphan nobody asked for.
-		if server.spawned {
-			server.child.stop(10 * time.Second)
-		}
+		r.cleanup(server)
 		return err
 	}
 	stopInfrastructure := func() {
@@ -290,9 +299,7 @@ func (r Runtime) RunInteractive(ctx context.Context) error {
 	tui, err := startForegroundChild(r.Herdr, HerdrTUIArgs(), r.Stdin, r.TUIOut, r.TUIErr)
 	if err != nil {
 		stopInfrastructure()
-		if server.spawned {
-			server.child.stop(10 * time.Second)
-		}
+		r.cleanup(server)
 		return fmt.Errorf("start Herdr TUI: %w", err)
 	}
 

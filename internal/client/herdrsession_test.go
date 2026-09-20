@@ -302,9 +302,9 @@ exit 0
 	}
 }
 
-// If the TUI cannot start, an invocation must not leave behind a server that
-// nobody asked for -- but it must never kill one it merely reused.
-func TestFailedTUIStopsOnlyASpawnedServer(t *testing.T) {
+// If a child fails to start, an invocation must not leave behind a server that
+// nobody asked for -- but it must never terminate one it merely reused.
+func TestCleanupStopsOnlyASpawnedServer(t *testing.T) {
 	herdr, stateDir := fakeHerdrCLI(t)
 	var out syncBuffer
 	r := sessionRuntime(t, herdr, stateDir, &out)
@@ -318,17 +318,37 @@ func TestFailedTUIStopsOnlyASpawnedServer(t *testing.T) {
 	if !spawned.spawned {
 		t.Fatal("expected to spawn")
 	}
-	// Simulate the cleanup RunInteractive performs for a spawned server.
-	spawned.child.stop(5 * time.Second)
+	if !serverRunning(stateDir) {
+		t.Fatal("server did not start")
+	}
 
-	// A reused server has no child to stop, so cleanup is structurally
-	// incapable of terminating somebody else's session.
-	reused := herdrServer{}
-	if reused.spawned {
-		t.Fatal("reused server must not be marked spawned")
+	// A server this invocation spawned is cleaned up on a child failure.
+	r.cleanup(spawned)
+	if serverRunning(stateDir) {
+		t.Fatalf("cleanup left an orphaned server\n%s", out.String())
+	}
+
+	// Now the reuse case: a server owned by somebody else must survive the
+	// identical cleanup, because cleanup is gated on ownership.
+	fresh, err := r.ensureHerdrServer(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reused, err := r.ensureHerdrServer(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reused.spawned || reused.child != nil {
+		t.Fatal("second invocation took ownership of a server it reused")
 	}
 	if reused.done() != nil {
 		t.Fatal("reused server must expose no exit channel")
 	}
+	r.cleanup(reused)
+	if !serverRunning(stateDir) {
+		t.Fatalf("cleanup terminated a server this invocation only reused\n%s", out.String())
+	}
+
 	_ = StopHerdrSession(context.Background(), herdr, r.HerdrEnv, &out)
+	fresh.child.stop(5 * time.Second)
 }
