@@ -36,6 +36,8 @@
           default = pkgs.mkShell {
             packages = [
               pkgs.go pkgs.gopls pkgs.gotools pkgs.openssh
+              # Shells exercised by the live pane-launcher tests.
+              pkgs.zsh pkgs.fish pkgs.dash
               herdr.packages.${system}.default
             ];
           };

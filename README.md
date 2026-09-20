@@ -35,7 +35,15 @@ and nonce values are never persisted. The access token is held in memory only lo
 enough for one `POST <familiar-url>/fleet`; a refresh token in the response is
 ignored.
 
-After connecting, run the interactive experience:
+After connecting, activate a Familiar runtime. This is a one-time prerequisite; the
+Herdr server refuses to start without it rather than falling back to whatever `pi`
+happens to be on the ambient `PATH`:
+
+```sh
+./familiar-fleet runtime apply github:gisikw/familiar/<commit>#familiar-worker-runtime
+```
+
+Then run the interactive experience:
 
 ```sh
 ./familiar-fleet
@@ -50,7 +58,83 @@ up remaining children. Herdr's server is launched as a session leader, preservin
 the detached-compatible semantics used by saved machines.
 
 Running without completed state prints a short instruction to run `connect`.
+Running without an activated runtime prints the exact `runtime apply` command.
 Options, including `--state-dir`, must precede the command.
+
+## Familiar runtime activation
+
+A *runtime* is an immutable Nix output—normally the flake installable
+`github:gisikw/familiar/<commit>#familiar-worker-runtime`—whose `bin/` provides the
+tools Herdr panes must resolve first, above all `pi`. `familiar-fleet` keeps two
+stable, node-local pointers under the state directory:
+
+```text
+<state>/runtime/current   -> /nix/store/…-familiar-worker-runtime   (in use)
+<state>/runtime/previous  -> /nix/store/…-familiar-worker-runtime   (last good)
+```
+
+```sh
+familiar-fleet runtime apply github:gisikw/familiar/<commit>#familiar-worker-runtime
+familiar-fleet runtime apply /nix/store/<hash>-familiar-worker-runtime   # already built
+familiar-fleet runtime status
+familiar-fleet runtime rollback
+```
+
+`apply` runs `nix build --no-link --print-out-paths` for a flake installable (or
+accepts an existing absolute store path), validates that the output is a directory
+with an executable `bin/pi`, smoke-runs `bin/pi --version`, then atomically repoints
+`current` (temporary symlink + `rename(2)`), first moving the old `current` to
+`previous`. It is idempotent: re-applying the active target changes nothing. A
+failed build, validation, or smoke test leaves both pointers untouched. `rollback`
+swaps the two pointers and refuses if `previous` is missing or unusable (for
+example after garbage collection). `status` reports both pointers and exits
+non-zero when nothing usable is active.
+
+Because the Herdr server and every pane reference `<state>/runtime/current/bin`
+rather than a store path, applying a new runtime takes effect in new panes and even
+in existing pane shells immediately. **No Herdr restart is required** for ordinary
+runtime changes. There is no polling daemon, release manifest, or credential
+handling in this slice; `runtime apply` is a narrow, explicit, idempotent step that
+another process may invoke.
+
+## Herdr pane environment
+
+Before the Familiar-owned Herdr server starts (`familiar-fleet` or
+`familiar-fleet herdr`), a preflight:
+
+1. requires a valid `runtime/current` (see above);
+2. resolves the user's shell from `$SHELL` (falling back to `/bin/sh` with a logged
+   note; refusing to select the Familiar launcher itself);
+3. regenerates `<state>/pane-shell` and `<state>/shell/*`;
+4. writes `<state>/herdr-config.toml`—the user's own Herdr `config.toml` with
+   Familiar's `[terminal]` `default_shell` and `shell_mode` applied, everything else
+   preserved—and validates it with `herdr config check`;
+5. starts `herdr server` with `runtime/current/bin` first on `PATH` and
+   `HERDR_CONFIG_PATH` pointing at the generated file.
+
+Only native Herdr configuration is used; Herdr is not patched. The TUI client keeps
+reading the user's own config for keybindings and chrome.
+
+`pane-shell` is an **environment adapter around the user's shell, not a replacement
+shell**. It execs the user's own shell so their normal interactive startup runs
+first—aliases, functions, prompt, plugins—and then, as the very last step, prepends
+`runtime/current/bin` to `PATH` so a bare `pi` resolves to the activated runtime no
+matter what the startup files did. `$SHELL` inside the pane is the user's real
+shell. The launcher owns the login decision, mirroring Herdr's `auto` policy (login
+startup on macOS, non-login elsewhere), and configures Herdr's `shell_mode` to
+`non_login` so Herdr does not re-wrap the launcher.
+
+| Shell | Mechanism |
+| --- | --- |
+| bash | `bash --rcfile <state>/shell/bashrc -i`; the rcfile emulates bash's own selection (login: `/etc/profile` then the first of `~/.bash_profile`, `~/.bash_login`, `~/.profile`; otherwise `~/.bashrc`), then asserts `PATH`. |
+| zsh | `ZDOTDIR=<state>/shell/zdotdir`; its `.zshenv`/`.zprofile`/`.zshrc`/`.zlogin` source the user's real files from their original `ZDOTDIR` (or `$HOME`, following a `.zshenv` that relocates it), assert `PATH` after `.zshrc` (or `.zlogin` for login shells), and restore `ZDOTDIR` so nested shells and `.zlogout` behave normally. |
+| fish | `fish -C '<assert>'`; `-C` runs after `config.fish` and `conf.d/` by design. |
+| sh, dash, ksh, mksh, ash, busybox | `ENV=<state>/shell/posix-env`, which sources the user's original `$ENV` first and asserts last. |
+| anything else | Exec with `PATH` pre-set plus a one-line warning that the shell's own startup files may override it. |
+
+If the runtime disappears after startup (for example, the store path is collected),
+the launcher prints a warning and still gives you a usable shell; the server-side
+preflight is where absence is fatal.
 
 ## Authentication and enrollment details
 
@@ -103,13 +187,18 @@ directory.
 ```text
 familiar-fleet                         tunnel + visible Herdr TUI
 familiar-fleet connect <familiar-url>  browser setup and enrollment
+familiar-fleet runtime apply <inst>    build/validate/atomically activate a runtime
+familiar-fleet runtime rollback        swap runtime/current and runtime/previous
+familiar-fleet runtime status          show both pointers and validity
 familiar-fleet herdr                   managed/headless Herdr server only
 familiar-fleet tunnel                  callback sshd + reconnecting tunnel only
 familiar-fleet version                 print version
 ```
 
-`herdr` inherits the complete environment and `PATH` of the service that starts it,
-so terminals spawned by Herdr see that same environment. `tunnel` writes operational
+`herdr` and the interactive command run the preflight described above and start the
+Herdr server with `runtime/current/bin` first on `PATH` and the generated
+`HERDR_CONFIG_PATH`; all other environment is inherited from the service that starts
+it. `tunnel` writes operational
 output to the state log and does not launch a TUI or Herdr server. These commands
 are intended to be separate managed services. TERM/INT causes bounded shutdown;
 child process groups receive TERM and then KILL if necessary. An unexpected local
@@ -135,11 +224,17 @@ The directory is mode `0700`. Important files are:
 - `familiar-fleet.log`: tunnel, callback `sshd`, and supervisor logs;
 - `tunnel_ed25519`: dedicated outbound tunnel identity;
 - `sshd_host_ed25519`: local callback server host identity;
-- generated `authorized_keys`, `known_hosts`, `sshd_config`, and wrappers.
+- generated `authorized_keys`, `known_hosts`, `sshd_config`, and wrappers;
+- `runtime/current` and `runtime/previous`: symlinks to activated runtimes;
+- `pane-shell` and `shell/`: generated Herdr pane launcher and per-shell startup
+  files (regenerated on every server start);
+- `herdr-config.toml`: generated server configuration.
 
 Private material, state, generated authorization files, and logs are owner-only.
 State writes are atomic; existing unsafe permissions are rejected. OAuth tokens are
-not part of state or logs.
+not part of state or logs. Because state paths are embedded in generated shell
+files, the state directory may not contain a colon, single quote, or control
+character.
 
 The local server binds `127.0.0.1` on an OS-selected high port. It disables
 passwords, keyboard-interactive auth, PAM, forwarding, agent/X11 forwarding,
@@ -154,7 +249,8 @@ strict pinned host checking, keepalives, and:
 
 ## Managed services
 
-Connect interactively once before installing services. Always choose an explicit,
+Connect interactively once and activate a runtime before installing services.
+Always choose an explicit,
 durable state path in service definitions. Run the split `herdr` and `tunnel`
 components rather than the interactive command.
 
@@ -197,7 +293,9 @@ the enrolled local user; the rendezvous must independently enforce a tunnel-only
 account and allocated listen port. This POC does not defend against a compromised
 local account, controller, Herdr binary, HTTPS identity boundary, or rendezvous. It
 does not implement remote unenrollment, daemon installation, or automatic host-key
-rotation.
+rotation. Runtime activation trusts whatever the operator passes to `runtime apply`;
+pinning to an exact commit is the caller's responsibility, and the generated pane
+launcher lives in the owner-only state directory alongside the other wrappers.
 
 ## Development
 
@@ -215,5 +313,9 @@ git diff --check
 Tests cover metadata and issuer discovery, authorize parameters and PKCE, callback
 state and token nonce, browser form enrollment, token non-persistence, command
 modes, state selection, strict state permissions, generated SSH configuration,
-process arguments, loopback `sshd`, and tunnel reconnect behavior. No live identity
-provider or privileged port is required.
+process arguments, loopback `sshd`, tunnel reconnect behavior, runtime pointer
+atomicity/idempotency/rollback, Herdr config merging, and pane-launcher generation.
+Live launcher tests run each supported shell with a user rc file that deliberately
+shadows `pi`, then check that the rc ran, aliases survive, and `pi` still resolves to
+the runtime; they skip when a shell is absent (the dev shell provides bash, zsh, fish,
+and dash). No live identity provider or privileged port is required.

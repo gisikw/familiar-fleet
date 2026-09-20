@@ -20,6 +20,13 @@ jobs:
         with:
           go-version: '1.22.x'
           cache: true
+      - name: Install shells for live pane-launcher tests
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update && sudo apt-get install -y zsh fish dash
+          else
+            brew install fish dash
+          fi
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
       - run: go test -race ./...
