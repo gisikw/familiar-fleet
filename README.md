@@ -105,17 +105,57 @@ Before the Familiar-owned Herdr server starts (`familiar-fleet` or
 `familiar-fleet herdr`), a preflight:
 
 1. requires a valid `runtime/current` (see above);
-2. resolves the user's shell from `$SHELL` (falling back to `/bin/sh` with a logged
+2. requires `FAMILIAR_TIAMAT_URL` and a usable Tiamat token file (see below);
+3. resolves the user's shell from `$SHELL` (falling back to `/bin/sh` with a logged
    note; refusing to select the Familiar launcher itself);
-3. regenerates `<state>/pane-shell` and `<state>/shell/*`;
-4. projects the runtime's public Pi settings into writable `<state>/runtime/pi`, with
+4. regenerates `<state>/pane-shell` and `<state>/shell/*`;
+5. projects the runtime's public Pi settings into writable `<state>/runtime/pi`, with
    its extension path routed through the stable `runtime/current` pointer;
-5. writes `<state>/herdr-config.toml`—the user's own Herdr `config.toml` with
+6. writes `<state>/herdr-config.toml`—the user's own Herdr `config.toml` with
    Familiar's `[terminal]` `default_shell` and `shell_mode` applied, everything else
    preserved—and validates it with `herdr config check`;
-6. starts `herdr server` with `runtime/current/bin` first on `PATH`,
-   `PI_CODING_AGENT_DIR` pointing at the projected profile, and `HERDR_CONFIG_PATH`
-   pointing at the generated file.
+7. starts `herdr server` with `runtime/current/bin` first on `PATH`,
+   `PI_CODING_AGENT_DIR` pointing at the projected profile, `HERDR_CONFIG_PATH`
+   pointing at the generated file, and the resolved `FAMILIAR_TIAMAT_URL` and
+   `FAMILIAR_TIAMAT_TOKEN_FILE` exported.
+
+Steps 1 and 2 are validated before anything is generated, so a misconfigured node
+fails loudly and without side effects.
+
+### Tiamat preflight
+
+Herdr agents talk to a Tiamat router, so both inputs must be settled before the
+server starts rather than surfacing later as an opaque in-pane failure:
+
+- **`FAMILIAR_TIAMAT_URL` is required and must be non-empty.** There is no sensible
+  default, so the preflight refuses to start Herdr without it and names the variable
+  in the error. Set it in the service environment.
+- **The token file must already exist.** If `FAMILIAR_TIAMAT_TOKEN_FILE` is set it is
+  used as-is; otherwise the path is deterministically `<state>/secrets/tiamat.token`.
+  Either way the resolved path is exported to the Herdr server and every pane, so a
+  normal agent start inherits it.
+
+The file must be a **readable, regular, non-empty file**. Its contents are never
+read, validated, logged, or placed in the environment—only the path is. A dummy or
+placeholder token is perfectly valid, because some routers behind the firewall do
+not actually require authentication; the check is that a token *file* is present,
+not that the token is meaningful.
+
+Provisioning that file is the operator's job. `familiar-fleet` never creates it,
+never downloads a secret, and never persists an OAuth token: the runtime stays
+public and immutable, and nothing in this path writes credentials.
+
+```sh
+mkdir -p -m 700 "$STATE/secrets"
+install -m 600 /dev/null "$STATE/secrets/tiamat.token"
+printf '%s' "$TIAMAT_TOKEN" > "$STATE/secrets/tiamat.token"   # a placeholder is fine
+```
+
+`<state>/secrets/` should be mode `0700` and the token file mode `0600`. The
+operational log records the router URL and the token *path* only.
+
+Environment supplied by `workspace.create` may still override semantic values where
+applicable; ordinary Herdr agent starts inherit these preflighted values.
 
 Only native Herdr configuration is used; Herdr is not patched. The TUI client keeps
 reading the user's own config for keybindings and chrome.
@@ -233,6 +273,9 @@ The directory is mode `0700`. Important files are:
 - `runtime/current` and `runtime/previous`: symlinks to activated runtimes;
 - `runtime/gcroots/`: registered Nix roots retaining those two runtime outputs;
 - `runtime/pi/`: writable Pi profile projected from the active runtime;
+- `secrets/`: operator-provisioned node-local secrets, mode `0700`; holds
+  `tiamat.token` (mode `0600`) unless `FAMILIAR_TIAMAT_TOKEN_FILE` overrides the
+  path. Never created, written, or read by this client—only checked for presence;
 - `pane-shell` and `shell/`: generated Herdr pane launcher and per-shell startup
   files (regenerated on every server start);
 - `herdr-config.toml`: generated server configuration.
@@ -257,6 +300,8 @@ strict pinned host checking, keepalives, and:
 ## Managed services
 
 Connect interactively once and activate a runtime before installing services.
+Provision `<state>/secrets/tiamat.token` and set `FAMILIAR_TIAMAT_URL` in the
+`herdr` unit as well; without both, the Herdr server refuses to start.
 Always choose an explicit,
 durable state path in service definitions. Run the split `herdr` and `tunnel`
 components rather than the interactive command.

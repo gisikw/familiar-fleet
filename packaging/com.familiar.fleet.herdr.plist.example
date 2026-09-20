@@ -10,6 +10,13 @@
     <string>herdr</string>
   </array>
   <key>RunAtLoad</key><true/>
+  <!-- The Herdr preflight requires a Tiamat router URL. The token file defaults
+       to <state>/secrets/tiamat.token; set FAMILIAR_TIAMAT_TOKEN_FILE to
+       override it. Provision the token out of band; no secret is downloaded. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>FAMILIAR_TIAMAT_URL</key><string>https://tiamat.example.com</string>
+  </dict>
   <key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>
   <key>ProcessType</key><string>Background</string>
   <key>StandardOutPath</key><string>/Users/REPLACE_ME/.local/state/familiar-fleet/herdr-service.log</string>

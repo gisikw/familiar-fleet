@@ -3,6 +3,10 @@ Description=Familiar Fleet Herdr server
 
 [Service]
 Type=simple
+# The Herdr preflight requires a Tiamat router URL. The token file defaults to
+# <state>/secrets/tiamat.token; set FAMILIAR_TIAMAT_TOKEN_FILE to override it.
+# Provision the token out of band; this service never downloads a secret.
+Environment=FAMILIAR_TIAMAT_URL=https://tiamat.example.com
 ExecStart=%h/.nix-profile/bin/familiar-fleet --state-dir %h/.local/state/familiar-fleet herdr
 Restart=on-failure
 RestartSec=5
