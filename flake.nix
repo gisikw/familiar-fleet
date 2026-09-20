@@ -25,7 +25,7 @@
             nativeBuildInputs = [ pkgs.makeWrapper ];
             postInstall = ''
               wrapProgram $out/bin/familiar-fleet \
-                --prefix PATH : ${pkgs.lib.makeBinPath [ herdrPackage pkgs.openssh ]}
+                --prefix PATH : ${pkgs.lib.makeBinPath [ herdrPackage ]}
             '';
           };
         });
