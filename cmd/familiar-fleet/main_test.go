@@ -16,6 +16,8 @@ func TestCommandModes(t *testing.T) {
 		{[]string{"connect", "https://familiar.example.com"}, "connect", []string{"https://familiar.example.com"}},
 		{[]string{"--state-dir", "/var/lib/familiar-fleet", "herdr"}, "herdr", nil},
 		{[]string{"tunnel"}, "tunnel", nil},
+		{[]string{"stop"}, "stop", nil},
+		{[]string{"--state-dir", "/tmp/s", "stop"}, "stop", nil},
 		{[]string{"run"}, "run", nil},
 		{[]string{"version"}, "version", nil},
 		{[]string{"runtime", "apply", "github:gisikw/familiar/abc123#familiar-worker-runtime"}, "runtime", []string{"apply", "github:gisikw/familiar/abc123#familiar-worker-runtime"}},
@@ -50,6 +52,25 @@ func TestRuntimeSubcommandUsage(t *testing.T) {
 	} {
 		if _, err := parseInvocation(args, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "runtime apply <installable>") {
 			t.Errorf("%v: unexpected error %v", args, err)
+		}
+	}
+}
+
+func TestStopTakesNoArguments(t *testing.T) {
+	if _, err := parseInvocation([]string{"stop", "extra"}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "takes no arguments") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestUsageDocumentsLifecycle(t *testing.T) {
+	var out bytes.Buffer
+	_, err := parseInvocation([]string{"-h"}, &out)
+	if err == nil {
+		t.Fatal("expected flag.ErrHelp")
+	}
+	for _, want := range []string{"stop", "leaves the Herdr", "reattach", "reconciled back to the enrolled runtime"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("usage missing %q:\n%s", want, out.String())
 		}
 	}
 }

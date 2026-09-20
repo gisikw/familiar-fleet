@@ -56,8 +56,11 @@ func parseInvocation(args []string, output io.Writer) (invocation, error) {
 	fs.StringVar(&o.nix, "nix", "nix", "nix executable (runtime apply)")
 	fs.StringVar(&o.nixStore, "nix-store", "nix-store", "nix-store executable (runtime GC roots)")
 	fs.Usage = func() {
-		fmt.Fprintln(fs.Output(), "Usage: familiar-fleet [options] [connect <familiar-url>|runtime <apply|rollback|status>|herdr|tunnel|version]")
+		fmt.Fprintln(fs.Output(), "Usage: familiar-fleet [options] [connect <familiar-url>|runtime <apply|rollback|status>|herdr|tunnel|stop|version]")
 		fmt.Fprintln(fs.Output(), "       familiar-fleet [options]              # tunnel + visible Herdr TUI")
+		fmt.Fprintln(fs.Output(), "       familiar-fleet [options] stop         # stop the familiar-fleet Herdr server/session")
+		fmt.Fprintln(fs.Output(), "\nLeaving the TUI stops the tunnel and callback sshd but leaves the Herdr")
+		fmt.Fprintln(fs.Output(), "session and its agents running; run familiar-fleet again to reattach.")
 		fmt.Fprintln(fs.Output(), "\nThe enrolled runtime is applied automatically on connect and on every")
 		fmt.Fprintln(fs.Output(), "normal or herdr start. These admin seams are for debugging only and are")
 		fmt.Fprintln(fs.Output(), "reconciled back to the enrolled runtime on the next normal start:")
@@ -98,7 +101,7 @@ func parseInvocation(args []string, output io.Writer) (invocation, error) {
 		default:
 			return invocation{}, usage
 		}
-	case "interactive", "run", "herdr", "tunnel", "version", "enroll":
+	case "interactive", "run", "herdr", "tunnel", "stop", "version", "enroll":
 		if len(inv.args) != 0 {
 			return invocation{}, fmt.Errorf("command %s takes no arguments", inv.command)
 		}
@@ -131,6 +134,17 @@ func run(args []string) error {
 	defer stop()
 	if inv.command == "runtime" {
 		return runtimeCommand(ctx, paths, o, inv.args)
+	}
+	// stop is deliberately handled before the state, runtime, and Tiamat
+	// preflights. It is the recovery path: it must work when enrollment, the
+	// runtime, or the Tiamat configuration is broken, and it needs nothing but
+	// the Herdr CLI and the session name.
+	if inv.command == "stop" {
+		herdr, err := client.FindBinary(o.herdr)
+		if err != nil {
+			return err
+		}
+		return client.StopHerdrSession(ctx, herdr, os.Environ(), os.Stdout)
 	}
 	state, err := client.LoadState(paths.State)
 	if err != nil {

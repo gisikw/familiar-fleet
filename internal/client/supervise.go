@@ -205,52 +205,104 @@ func (r Runtime) startInfrastructure(ctx context.Context) (*child, context.Cance
 }
 
 func (r Runtime) stopHerdrServer() {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, r.Herdr, HerdrStopArgs()...)
-	cmd.Env = r.HerdrEnv
-	cmd.Stdout, cmd.Stderr = r.Stdout, r.Stderr
-	if err := cmd.Run(); err != nil {
+	if err := StopHerdrSession(ctx, r.Herdr, r.HerdrEnv, r.Stdout); err != nil {
 		r.Logger.Printf("stopping Herdr session: %v", err)
 	}
 }
 
-// RunInteractive owns one complete invocation: detached-compatible Herdr
-// server, visible TUI, callback sshd, and reconnecting tunnel. Leaving the TUI
-// intentionally tears all four down.
+// herdrServer is the named session this invocation is working with, plus
+// whether this invocation is the process that spawned it. Ownership decides
+// cleanup: we only tear down a server we created.
+type herdrServer struct {
+	child   *child
+	spawned bool
+}
+
+// done fires only for a server this invocation spawned. A reused server is
+// somebody else's child, so there is no exit to observe and the nil channel
+// blocks forever in a select.
+func (h herdrServer) done() <-chan error {
+	if h.child == nil {
+		return nil
+	}
+	return h.child.done
+}
+
+// ensureHerdrServer reuses an existing healthy named server or starts one.
+// Herdr refuses to start a second server for the same session, so detecting
+// the healthy case is what makes a repeated plain invocation work instead of
+// dying on "server is already running".
+func (r Runtime) ensureHerdrServer(ctx context.Context) (herdrServer, error) {
+	status, err := QueryHerdrServer(ctx, r.Herdr, r.HerdrEnv)
+	if err != nil {
+		return herdrServer{}, err
+	}
+	if status.Healthy() {
+		r.Logger.Printf("reusing running Herdr session %s (server version %s)", herdrSession, status.Version)
+		return herdrServer{}, nil
+	}
+	if status.Running {
+		return herdrServer{}, fmt.Errorf("Herdr session %s is running an incompatible server (version %s); run: familiar-fleet stop", herdrSession, status.Version)
+	}
+	server, err := startDetachedChild(r.Herdr, HerdrServerArgs(), r.HerdrEnv, r.Stdout, r.Stderr)
+	if err != nil {
+		return herdrServer{}, fmt.Errorf("start Herdr server: %w", err)
+	}
+	if err := r.waitHerdrReady(ctx, server); err != nil {
+		server.stop(10 * time.Second)
+		return herdrServer{}, err
+	}
+	r.Logger.Printf("Herdr session %s server started", herdrSession)
+	return herdrServer{child: server, spawned: true}, nil
+}
+
+// RunInteractive owns one visible invocation: it ensures the named Herdr
+// server exists (reusing a healthy one), starts the callback sshd and reverse
+// tunnel, and attaches the visible TUI.
+//
+// Leaving the TUI stops this invocation's tunnel and sshd but deliberately
+// leaves the named Herdr server, its session, and any running agents alive, so
+// work continues and a later invocation can reattach. Use `familiar-fleet stop`
+// to end the session explicitly.
 func (r Runtime) RunInteractive(ctx context.Context) error {
-	sshd, cancel, tunnelDone, _, err := r.startInfrastructure(ctx)
+	server, err := r.ensureHerdrServer(ctx)
 	if err != nil {
 		return err
 	}
-	defer func() {
+
+	sshd, cancel, tunnelDone, _, err := r.startInfrastructure(ctx)
+	if err != nil {
+		// The tunnel never came up, so this invocation accomplished nothing;
+		// a server we just spawned would be an orphan nobody asked for.
+		if server.spawned {
+			server.child.stop(10 * time.Second)
+		}
+		return err
+	}
+	stopInfrastructure := func() {
 		cancel()
 		sshd.stop(5 * time.Second)
 		<-tunnelDone
-	}()
-
-	server, err := startDetachedChild(r.Herdr, HerdrServerArgs(), r.HerdrEnv, r.Stdout, r.Stderr)
-	if err != nil {
-		return fmt.Errorf("start Herdr server: %w", err)
 	}
-	defer server.stop(10 * time.Second)
-	if err := r.waitHerdrReady(ctx, server); err != nil {
-		return err
-	}
-	r.Logger.Printf("Herdr session %s server started", herdrSession)
 
 	tui, err := startForegroundChild(r.Herdr, HerdrTUIArgs(), r.Stdin, r.TUIOut, r.TUIErr)
 	if err != nil {
-		r.stopHerdrServer()
+		stopInfrastructure()
+		if server.spawned {
+			server.child.stop(10 * time.Second)
+		}
 		return fmt.Errorf("start Herdr TUI: %w", err)
 	}
+
 	var result error
 	select {
 	case err := <-tui.done:
 		if err != nil {
 			result = fmt.Errorf("Herdr TUI exited: %w", err)
 		}
-	case err := <-server.done:
+	case err := <-server.done():
 		result = fmt.Errorf("Herdr server exited unexpectedly: %w", exitError(err))
 		tui.stop(5 * time.Second)
 	case err := <-sshd.done:
@@ -259,31 +311,60 @@ func (r Runtime) RunInteractive(ctx context.Context) error {
 	case <-ctx.Done():
 		tui.stop(5 * time.Second)
 	}
-	cancel()
-	sshd.stop(5 * time.Second)
-	<-tunnelDone
-	r.stopHerdrServer()
-	server.stop(10 * time.Second)
+	stopInfrastructure()
+	r.Logger.Printf("tunnel and callback sshd stopped; Herdr session %s left running", herdrSession)
+	fmt.Fprintf(r.TUIErr, "Herdr session %s and its agents are still running. Reattach with familiar-fleet, or end it with familiar-fleet stop.\n", herdrSession)
 	return result
 }
 
 // RunHerdr is the managed-service/headless Herdr component. The server runs
 // with HerdrEnv (runtime/current/bin first on PATH, generated
 // HERDR_CONFIG_PATH), so terminals spawned by Herdr see that environment.
+//
+// Unlike the interactive command, this supervisor owns shutdown: it is a
+// service whose lifetime is the session's lifetime, so a TERM from the service
+// manager stops the named Herdr server. That keeps `systemctl --user stop` /
+// `launchctl bootout` semantics honest rather than leaving an orphaned server
+// no unit is tracking. If the server was already running when the service
+// started, it is adopted rather than duplicated, and still stopped on exit.
 func (r Runtime) RunHerdr(ctx context.Context) error {
-	server, err := startDetachedChild(r.Herdr, HerdrServerArgs(), r.HerdrEnv, r.Stdout, r.Stderr)
+	server, err := r.ensureHerdrServer(ctx)
 	if err != nil {
-		return fmt.Errorf("start Herdr server: %w", err)
+		return err
+	}
+	if !server.spawned {
+		return r.superviseAdoptedHerdr(ctx)
 	}
 	select {
-	case err := <-server.done:
+	case err := <-server.child.done:
 		if err != nil {
 			return fmt.Errorf("Herdr server exited: %w", err)
 		}
 		return nil
 	case <-ctx.Done():
-		server.stop(10 * time.Second)
+		r.stopHerdrServer()
+		server.child.stop(10 * time.Second)
 		return nil
+	}
+}
+
+// superviseAdoptedHerdr supervises a server this process did not spawn. There
+// is no child to wait on, so the native status affordance is polled until the
+// session goes away or the service is asked to stop.
+func (r Runtime) superviseAdoptedHerdr(ctx context.Context) error {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			status, err := QueryHerdrServer(ctx, r.Herdr, r.HerdrEnv)
+			if err == nil && !status.Running {
+				return errors.New("adopted Herdr server is no longer running")
+			}
+		case <-ctx.Done():
+			r.stopHerdrServer()
+			return nil
+		}
 	}
 }
 
