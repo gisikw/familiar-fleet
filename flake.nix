@@ -3,7 +3,8 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-    herdr.url = "github:herdrdev/herdr/v0.9.1";
+    # Exact herdr-nix commit packaging upstream's v0.9.1 release binaries.
+    herdr.url = "github:herdrdev/herdr-nix/2bcfa02424385730d0c65cfa8cd355bb3afecef8";
   };
 
   outputs = { self, nixpkgs, herdr }:
