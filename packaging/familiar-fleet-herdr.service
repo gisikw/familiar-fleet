@@ -3,7 +3,7 @@ Description=Familiar Fleet Herdr server
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/familiar-fleet --state-dir %h/.local/state/familiar-fleet herdr
+ExecStart=%h/.nix-profile/bin/familiar-fleet --state-dir %h/.local/state/familiar-fleet herdr
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=20

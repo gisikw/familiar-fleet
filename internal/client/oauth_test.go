@@ -206,6 +206,19 @@ func TestDiscoveryAndNonceValidation(t *testing.T) {
 
 func serverURLFromRequest(r *http.Request) string { return "http://" + r.Host }
 
+func TestMachineNameMatchesRegistryContract(t *testing.T) {
+	for _, name := range []string{"macbook", "Kevin-Macbook", "a", strings.Repeat("a", 63)} {
+		if err := ValidateMachineName(name); err != nil {
+			t.Errorf("valid name %q rejected: %v", name, err)
+		}
+	}
+	for _, name := range []string{"", "-macbook", "macbook-", "mac_book", "mac.book", strings.Repeat("a", 64)} {
+		if err := ValidateMachineName(name); err == nil {
+			t.Errorf("invalid name %q accepted", name)
+		}
+	}
+}
+
 func TestStateDirectoryPrecedence(t *testing.T) {
 	if got, _ := ResolveStateDir("/explicit", 0, "/xdg", "/home/root"); got != "/explicit" {
 		t.Fatalf("explicit = %q", got)

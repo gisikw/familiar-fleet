@@ -5,9 +5,8 @@
   <key>Label</key><string>com.familiar.fleet.herdr</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/REPLACE_ME/.local/bin/familiar-fleet</string>
+    <string>/Users/REPLACE_ME/.nix-profile/bin/familiar-fleet</string>
     <string>--state-dir</string><string>/Users/REPLACE_ME/.local/state/familiar-fleet</string>
-    <string>--herdr</string><string>/ABSOLUTE/PATH/TO/herdr</string>
     <string>herdr</string>
   </array>
   <key>RunAtLoad</key><true/>

@@ -157,6 +157,30 @@ func HerdrServerArgs() []string { return []string{"--session", herdrSession, "se
 func HerdrTUIArgs() []string    { return []string{"--session", herdrSession} }
 func HerdrStopArgs() []string   { return []string{"--session", herdrSession, "server", "stop"} }
 
+func (r Runtime) waitHerdrReady(ctx context.Context, server *child) error {
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		probeCtx, cancel := context.WithTimeout(ctx, time.Second)
+		output, _ := exec.CommandContext(probeCtx, r.Herdr, "--session", herdrSession, "status", "server", "--json").Output()
+		cancel()
+		if strings.Contains(string(output), `"running":true`) {
+			return nil
+		}
+		select {
+		case err := <-server.done:
+			return fmt.Errorf("Herdr server exited before becoming ready: %w", exitError(err))
+		case <-ticker.C:
+		case <-deadline.C:
+			return errors.New("timed out waiting for Herdr server")
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 func (r Runtime) startInfrastructure(ctx context.Context) (*child, context.CancelFunc, <-chan struct{}, int, error) {
 	runCtx, cancel := context.WithCancel(ctx)
 	sshd, localPort, err := r.startSSHD(runCtx)
@@ -202,6 +226,9 @@ func (r Runtime) RunInteractive(ctx context.Context) error {
 		return fmt.Errorf("start Herdr server: %w", err)
 	}
 	defer server.stop(10 * time.Second)
+	if err := r.waitHerdrReady(ctx, server); err != nil {
+		return err
+	}
 	r.Logger.Printf("Herdr session %s server started", herdrSession)
 
 	tui, err := startForegroundChild(r.Herdr, HerdrTUIArgs(), r.Stdin, r.TUIOut, r.TUIErr)

@@ -19,7 +19,10 @@ import (
 const stateVersion = 1
 
 var (
-	labelRE    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$`)
+	// Fleet registry names are single DNS labels. It canonicalizes case, but
+	// rejecting dots/underscores and overlong labels here keeps the browser
+	// form aligned with the enrollment API instead of failing after OAuth.
+	labelRE    = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
 	nodeIDRE   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$`)
 	hostPartRE = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$`)
 	userRE     = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,63}$`)
@@ -228,7 +231,7 @@ func CanonicalEndpoint(raw string) (string, error) {
 
 func ValidateMachineName(name string) error {
 	if !labelRE.MatchString(name) {
-		return errors.New("use 1-253 letters, digits, dots, underscores, or hyphens; start with a letter or digit")
+		return errors.New("use a 1-63 character DNS label containing only letters, digits, or interior hyphens")
 	}
 	return nil
 }

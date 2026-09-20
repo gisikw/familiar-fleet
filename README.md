@@ -160,10 +160,11 @@ components rather than the interactive command.
 
 ### Linux systemd user services
 
-The examples use `%h/.local/state/familiar-fleet` explicitly:
+Install the flake package—not the repository's `./familiar-fleet` launcher by
+itself, because that launcher deliberately resolves the flake beside it:
 
 ```sh
-install -Dm755 familiar-fleet "$HOME/.local/bin/familiar-fleet"
+nix profile install .#
 install -Dm644 packaging/familiar-fleet.service \
   "$HOME/.config/systemd/user/familiar-fleet-tunnel.service"
 install -Dm644 packaging/familiar-fleet-herdr.service \
@@ -172,16 +173,20 @@ systemctl --user daemon-reload
 systemctl --user enable --now familiar-fleet-herdr.service familiar-fleet-tunnel.service
 ```
 
-Adjust absolute executable paths if the user manager's `PATH` lacks Herdr or
-OpenSSH. For a system/root service, use `--state-dir /var/lib/familiar-fleet` and
-ensure the enrollment belongs to the service's local user.
+The examples use `%h/.nix-profile/bin/familiar-fleet` and
+`%h/.local/state/familiar-fleet` explicitly. Adjust absolute OpenSSH paths if the
+user manager cannot find the host tools. For a system/root service, use
+`--state-dir /var/lib/familiar-fleet` and ensure the enrollment belongs to the
+service's local user.
 
 ### macOS launchd
 
-Copy both plist examples to `~/Library/LaunchAgents`, replace `REPLACE_ME` and all
-executable placeholders, and bootstrap both labels. They explicitly use
-`/Users/REPLACE_ME/.local/state/familiar-fleet`. launchd has a sparse `PATH`, so use
-absolute Herdr/OpenSSH paths. Remote Login may remain disabled.
+First run `nix profile install .#`. Copy both plist examples to
+`~/Library/LaunchAgents`, replace `REPLACE_ME`, and bootstrap both labels. They use
+`/Users/REPLACE_ME/.nix-profile/bin/familiar-fleet` and an explicit
+`/Users/REPLACE_ME/.local/state/familiar-fleet`. The tunnel plist supplies absolute
+paths for macOS's host OpenSSH tools; Herdr remains the version pinned inside the
+installed flake package. Remote Login may remain disabled.
 
 ## Threat model and limitations
 
