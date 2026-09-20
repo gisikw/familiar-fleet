@@ -33,9 +33,19 @@ type child struct {
 }
 
 func startChild(path string, args []string, stdout, stderr io.Writer) (*child, error) {
+	return startChildWithAttrs(path, args, stdout, stderr, &syscall.SysProcAttr{Setpgid: true})
+}
+
+func startDetachedChild(path string, args []string, stdout, stderr io.Writer) (*child, error) {
+	// Herdr identifies a server daemon by it being its own session leader. This
+	// is also what Herdr's own auto-spawn path does on macOS and Linux.
+	return startChildWithAttrs(path, args, stdout, stderr, &syscall.SysProcAttr{Setsid: true})
+}
+
+func startChildWithAttrs(path string, args []string, stdout, stderr io.Writer, attrs *syscall.SysProcAttr) (*child, error) {
 	cmd := exec.Command(path, args...)
 	cmd.Stdout, cmd.Stderr, cmd.Stdin = stdout, stderr, nil
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = attrs
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -133,7 +143,7 @@ func (r Runtime) Run(ctx context.Context) error {
 	defer sshd.stop(5 * time.Second)
 	r.Logger.Printf("local callback sshd listening on 127.0.0.1:%d", localPort)
 
-	herdr, err := startChild(r.Herdr, []string{"--session", "familiar-fleet", "server"}, r.Stdout, r.Stderr)
+	herdr, err := startDetachedChild(r.Herdr, []string{"--session", "familiar-fleet", "server"}, r.Stdout, r.Stderr)
 	if err != nil {
 		return fmt.Errorf("start herdr: %w", err)
 	}
