@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/signal"
@@ -22,6 +23,12 @@ type options struct {
 	herdr, ssh, sshd, keygen                     string
 }
 
+type invocation struct {
+	options options
+	command string
+	args    []string
+}
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -32,13 +39,13 @@ func main() {
 	}
 }
 
-func run(args []string) error {
+func parseInvocation(args []string, output io.Writer) (invocation, error) {
 	fs := flag.NewFlagSet("familiar-fleet", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
+	fs.SetOutput(output)
 	o := options{}
-	fs.StringVar(&o.endpoint, "endpoint", os.Getenv("FAMILIAR_FLEET_ENDPOINT"), "Familiar deployment base URL (or FAMILIAR_FLEET_ENDPOINT)")
-	fs.StringVar(&o.name, "name", "", "requested machine label (first enrollment only; defaults to hostname)")
-	fs.StringVar(&o.tokenFile, "token-file", "", "owner-only file containing enrollment bearer token")
+	fs.StringVar(&o.endpoint, "endpoint", os.Getenv("FAMILIAR_FLEET_ENDPOINT"), "deployment URL (debug enroll compatibility only)")
+	fs.StringVar(&o.name, "name", "", "machine name (debug enroll compatibility only)")
+	fs.StringVar(&o.tokenFile, "token-file", "", "owner-only bearer-token file (debug enroll compatibility only)")
 	fs.StringVar(&o.hostKey, "rendezvous-host-key", os.Getenv("FAMILIAR_FLEET_RENDEZVOUS_HOST_KEY"), "trusted OpenSSH rendezvous host public key")
 	fs.StringVar(&o.stateDir, "state-dir", "", "state directory override")
 	fs.StringVar(&o.herdr, "herdr", "herdr", "Herdr executable")
@@ -46,26 +53,44 @@ func run(args []string) error {
 	fs.StringVar(&o.sshd, "sshd", "sshd", "OpenSSH server executable")
 	fs.StringVar(&o.keygen, "ssh-keygen", "ssh-keygen", "ssh-keygen executable")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: familiar-fleet [options] [run|enroll|version]\n\nrun is the default. Options:\n")
+		fmt.Fprintln(fs.Output(), "Usage: familiar-fleet [options] [connect <familiar-url>|herdr|tunnel|version]")
+		fmt.Fprintln(fs.Output(), "       familiar-fleet [options]              # tunnel + visible Herdr TUI")
+		fmt.Fprintln(fs.Output(), "\nOptions must precede the command:")
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
+		return invocation{}, err
+	}
+	inv := invocation{options: o, command: "interactive"}
+	if fs.NArg() > 0 {
+		inv.command = fs.Arg(0)
+		inv.args = fs.Args()[1:]
+	}
+	switch inv.command {
+	case "connect":
+		if len(inv.args) != 1 {
+			return invocation{}, errors.New("usage: familiar-fleet [options] connect <familiar-url>")
+		}
+	case "interactive", "run", "herdr", "tunnel", "version", "enroll":
+		if len(inv.args) != 0 {
+			return invocation{}, fmt.Errorf("command %s takes no arguments", inv.command)
+		}
+	default:
+		fs.Usage()
+		return invocation{}, fmt.Errorf("unknown command %q", inv.command)
+	}
+	return inv, nil
+}
+
+func run(args []string) error {
+	inv, err := parseInvocation(args, os.Stderr)
+	if err != nil {
 		return err
 	}
-	command := "run"
-	if fs.NArg() > 0 {
-		command = fs.Arg(0)
-	}
-	if fs.NArg() > 1 {
-		return errors.New("too many arguments")
-	}
-	if command == "version" {
+	o := inv.options
+	if inv.command == "version" {
 		fmt.Println(version)
 		return nil
-	}
-	if command != "run" && command != "enroll" {
-		fs.Usage()
-		return fmt.Errorf("unknown command %q", command)
 	}
 
 	paths, err := client.StatePaths(o.stateDir)
@@ -75,87 +100,32 @@ func run(args []string) error {
 	if err := client.EnsureStateDir(paths.Dir); err != nil {
 		return fmt.Errorf("prepare state: %w", err)
 	}
-	keygen, err := client.FindBinary(o.keygen)
-	if err != nil {
-		return err
-	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	tunnelPublic, err := client.EnsureKey(ctx, keygen, paths.TunnelKey, "familiar-fleet-tunnel")
-	if err != nil {
-		return fmt.Errorf("prepare tunnel identity: %w", err)
-	}
-	hostPublic, err := client.EnsureKey(ctx, keygen, paths.HostKey, "familiar-fleet-local-sshd")
-	if err != nil {
-		return fmt.Errorf("prepare local SSH host identity: %w", err)
-	}
-
 	state, err := client.LoadState(paths.State)
 	if err != nil {
 		return err
 	}
-	if state == nil {
-		if o.endpoint == "" {
-			return errors.New("first enrollment requires --endpoint")
-		}
-		if err := client.ValidateEndpoint(o.endpoint); err != nil {
-			return err
-		}
-		current, err := user.Current()
-		if err != nil {
-			return fmt.Errorf("determine local user: %w", err)
-		}
-		name := o.name
-		if name == "" {
-			name, err = os.Hostname()
-			if err != nil {
-				return fmt.Errorf("determine hostname: %w", err)
-			}
-			name = strings.SplitN(name, ".", 2)[0]
-		}
-		token, err := client.ReadToken(o.tokenFile)
-		if err != nil {
-			return fmt.Errorf("read enrollment token: %w", err)
-		}
-		e := client.Enroller{Endpoint: o.endpoint, Token: token}
-		enrollment, err := e.Enroll(ctx, client.EnrollmentRequest{Host: name, TunnelPublicKey: tunnelPublic, SSHHostPublicKey: hostPublic, SSHUser: current.Username})
-		if err != nil {
-			return err
-		}
-		if err := applyHostKey(&enrollment, o.hostKey); err != nil {
-			return err
-		}
-		state = &client.State{Endpoint: strings.TrimRight(o.endpoint, "/"), SSHUser: current.Username, Enrollment: enrollment}
-		if err := client.SaveState(paths.State, *state); err != nil {
-			return fmt.Errorf("save enrollment: %w", err)
-		}
-		fmt.Fprintf(os.Stderr, "enrolled as %s (node %s; reverse port %d)\n", enrollment.Host, enrollment.NodeID, enrollment.Port)
-	} else {
-		if o.endpoint != "" && strings.TrimRight(o.endpoint, "/") != state.Endpoint {
-			return errors.New("configured endpoint differs from saved enrollment; use a separate --state-dir to enroll elsewhere")
-		}
-		if o.name != "" {
-			return errors.New("--name cannot change an existing server-owned enrollment")
-		}
-		if o.hostKey != "" {
-			provided, err := client.NormalizePublicKey(o.hostKey)
-			if err != nil {
-				return fmt.Errorf("rendezvous host key: %w", err)
-			}
-			saved, _ := client.NormalizePublicKey(state.Enrollment.TunnelHostKey)
-			if provided != saved {
-				return errors.New("provided rendezvous host key does not match the pinned key")
-			}
-		}
+	if state == nil && inv.command != "connect" && inv.command != "enroll" {
+		return errors.New("not connected; run: familiar-fleet connect <familiar-url>")
 	}
-	if command == "enroll" {
-		fmt.Fprintf(os.Stdout, "enrolled: host=%s node_id=%s reverse_port=%d rendezvous=%s:%d\n", state.Enrollment.Host, state.Enrollment.NodeID, state.Enrollment.Port, state.Enrollment.TunnelHost, state.Enrollment.TunnelSSHPort)
-		return nil
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if inv.command == "connect" {
+		if state != nil {
+			return fmt.Errorf("already connected to %s; use a separate --state-dir for another deployment", state.Endpoint)
+		}
+		if o.tokenFile != "" || o.name != "" {
+			return errors.New("connect uses browser authentication and its name form; --token-file and --name are only for debug enroll")
+		}
+		return connect(ctx, paths, o, inv.args[0])
+	}
+	if inv.command == "enroll" {
+		return debugEnroll(ctx, paths, o, state)
 	}
 
 	current, err := user.Current()
 	if err != nil {
-		return err
+		return fmt.Errorf("determine local user: %w", err)
 	}
 	if current.Username != state.SSHUser {
 		return fmt.Errorf("enrollment belongs to local user %q, but this process runs as %q", state.SSHUser, current.Username)
@@ -164,6 +134,16 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
+	runtime := client.Runtime{
+		Paths: paths, Enrollment: state.Enrollment, LocalUser: state.SSHUser,
+		Herdr: herdr, Stdin: os.Stdin, TUIOut: os.Stdout, TUIErr: os.Stderr,
+	}
+	if inv.command == "herdr" {
+		runtime.Stdout, runtime.Stderr = os.Stdout, os.Stderr
+		runtime.Logger = log.New(os.Stderr, "familiar-fleet: ", log.LstdFlags)
+		return runtime.RunHerdr(ctx)
+	}
+
 	ssh, err := client.FindBinary(o.ssh)
 	if err != nil {
 		return err
@@ -172,10 +152,122 @@ func run(args []string) error {
 	if err != nil {
 		return err
 	}
-	logger := log.New(os.Stderr, "familiar-fleet: ", log.LstdFlags)
-	runtime := client.Runtime{Paths: paths, Enrollment: state.Enrollment, LocalUser: state.SSHUser, Herdr: herdr, SSH: ssh, SSHD: sshd, Stdout: os.Stdout, Stderr: os.Stderr, Logger: logger}
-	logger.Printf("starting node %s (%s)", state.Enrollment.Host, state.Enrollment.NodeID)
-	return runtime.Run(ctx)
+	logFile, err := client.OpenLog(paths.Log)
+	if err != nil {
+		return fmt.Errorf("open operational log: %w", err)
+	}
+	defer logFile.Close()
+	runtime.SSH, runtime.SSHD = ssh, sshd
+	runtime.Stdout, runtime.Stderr = logFile, logFile
+	runtime.Logger = log.New(logFile, "familiar-fleet: ", log.LstdFlags)
+	runtime.Logger.Printf("starting node %s (%s)", state.Enrollment.Host, state.Enrollment.NodeID)
+	if inv.command == "tunnel" {
+		return runtime.RunTunnel(ctx)
+	}
+	return runtime.RunInteractive(ctx)
+}
+
+func prepareEnrollment(ctx context.Context, paths client.Paths, o options) (client.EnrollmentRequest, string, error) {
+	keygen, err := client.FindBinary(o.keygen)
+	if err != nil {
+		return client.EnrollmentRequest{}, "", err
+	}
+	tunnelPublic, err := client.EnsureKey(ctx, keygen, paths.TunnelKey, "familiar-fleet-tunnel")
+	if err != nil {
+		return client.EnrollmentRequest{}, "", fmt.Errorf("prepare tunnel identity: %w", err)
+	}
+	hostPublic, err := client.EnsureKey(ctx, keygen, paths.HostKey, "familiar-fleet-local-sshd")
+	if err != nil {
+		return client.EnrollmentRequest{}, "", fmt.Errorf("prepare local SSH host identity: %w", err)
+	}
+	current, err := user.Current()
+	if err != nil {
+		return client.EnrollmentRequest{}, "", fmt.Errorf("determine local user: %w", err)
+	}
+	return client.EnrollmentRequest{TunnelPublicKey: tunnelPublic, SSHHostPublicKey: hostPublic, SSHUser: current.Username}, current.Username, nil
+}
+
+func shortHostname() (string, error) {
+	name, err := os.Hostname()
+	if err != nil {
+		return "", fmt.Errorf("determine hostname: %w", err)
+	}
+	return strings.SplitN(name, ".", 2)[0], nil
+}
+
+func connect(ctx context.Context, paths client.Paths, o options, rawEndpoint string) error {
+	endpoint, err := client.CanonicalEndpoint(rawEndpoint)
+	if err != nil {
+		return err
+	}
+	request, username, err := prepareEnrollment(ctx, paths, o)
+	if err != nil {
+		return err
+	}
+	name, err := shortHostname()
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "Opening your browser to authenticate and name this machine…")
+	connector := client.Connector{}
+	enrollment, err := connector.Connect(ctx, endpoint, name, request, func(enrollment client.Enrollment) error {
+		if err := applyHostKey(&enrollment, o.hostKey); err != nil {
+			return err
+		}
+		state := client.State{Endpoint: endpoint, SSHUser: username, Enrollment: enrollment}
+		if err := client.SaveState(paths.State, state); err != nil {
+			return fmt.Errorf("save enrollment: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "Connected as %s (node %s). Run familiar-fleet to begin.\n", enrollment.Host, enrollment.NodeID)
+	return nil
+}
+
+func debugEnroll(ctx context.Context, paths client.Paths, o options, state *client.State) error {
+	if state != nil {
+		fmt.Fprintf(os.Stdout, "enrolled: host=%s node_id=%s reverse_port=%d rendezvous=%s:%d\n", state.Enrollment.Host, state.Enrollment.NodeID, state.Enrollment.Port, state.Enrollment.TunnelHost, state.Enrollment.TunnelSSHPort)
+		return nil
+	}
+	if o.endpoint == "" {
+		return errors.New("debug enrollment requires --endpoint and --token-file")
+	}
+	endpoint, err := client.CanonicalEndpoint(o.endpoint)
+	if err != nil {
+		return err
+	}
+	request, username, err := prepareEnrollment(ctx, paths, o)
+	if err != nil {
+		return err
+	}
+	name := o.name
+	if name == "" {
+		name, err = shortHostname()
+		if err != nil {
+			return err
+		}
+	}
+	request.Host = name
+	token, err := client.ReadToken(o.tokenFile)
+	if err != nil {
+		return fmt.Errorf("read enrollment token: %w", err)
+	}
+	enrollment, err := (client.Enroller{Endpoint: endpoint, Token: token}).Enroll(ctx, request)
+	token = ""
+	if err != nil {
+		return err
+	}
+	if err := applyHostKey(&enrollment, o.hostKey); err != nil {
+		return err
+	}
+	if err := client.SaveState(paths.State, client.State{Endpoint: endpoint, SSHUser: username, Enrollment: enrollment}); err != nil {
+		return fmt.Errorf("save enrollment: %w", err)
+	}
+	fmt.Fprintf(os.Stdout, "enrolled: host=%s node_id=%s reverse_port=%d rendezvous=%s:%d\n", enrollment.Host, enrollment.NodeID, enrollment.Port, enrollment.TunnelHost, enrollment.TunnelSSHPort)
+	return nil
 }
 
 func applyHostKey(enrollment *client.Enrollment, supplied string) error {

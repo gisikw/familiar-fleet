@@ -8,6 +8,7 @@ import (
 	"log"
 	"math/rand"
 	"net"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
@@ -17,39 +18,50 @@ import (
 	"time"
 )
 
+const herdrSession = "familiar-fleet"
+
 type Runtime struct {
 	Paths            Paths
 	Enrollment       Enrollment
 	LocalUser        string
 	Herdr, SSH, SSHD string
-	Stdout, Stderr   io.Writer
+	Stdin            io.Reader
+	Stdout, Stderr   io.Writer // operational child output (normally the state log)
 	Logger           *log.Logger
+	TUIOut, TUIErr   io.Writer
 }
 
 type child struct {
-	cmd  *exec.Cmd
-	done chan error
-	once sync.Once
+	cmd          *exec.Cmd
+	done         chan error
+	once         sync.Once
+	processGroup bool
 }
 
-func startChild(path string, args []string, stdout, stderr io.Writer) (*child, error) {
-	return startChildWithAttrs(path, args, stdout, stderr, &syscall.SysProcAttr{Setpgid: true})
+func startChild(path string, args []string, stdin io.Reader, stdout, stderr io.Writer) (*child, error) {
+	return startChildWithAttrs(path, args, stdin, stdout, stderr, &syscall.SysProcAttr{Setpgid: true}, true)
+}
+
+func startForegroundChild(path string, args []string, stdin io.Reader, stdout, stderr io.Writer) (*child, error) {
+	// Inherit the parent's foreground process group. Putting a TUI that reads
+	// the controlling terminal in a new, non-foreground group causes SIGTTIN.
+	return startChildWithAttrs(path, args, stdin, stdout, stderr, nil, false)
 }
 
 func startDetachedChild(path string, args []string, stdout, stderr io.Writer) (*child, error) {
-	// Herdr identifies a server daemon by it being its own session leader. This
-	// is also what Herdr's own auto-spawn path does on macOS and Linux.
-	return startChildWithAttrs(path, args, stdout, stderr, &syscall.SysProcAttr{Setsid: true})
+	// Herdr requires its server process to be a session leader, matching its own
+	// auto-spawn behavior and preserving sessions used by saved machines.
+	return startChildWithAttrs(path, args, nil, stdout, stderr, &syscall.SysProcAttr{Setsid: true}, true)
 }
 
-func startChildWithAttrs(path string, args []string, stdout, stderr io.Writer, attrs *syscall.SysProcAttr) (*child, error) {
+func startChildWithAttrs(path string, args []string, stdin io.Reader, stdout, stderr io.Writer, attrs *syscall.SysProcAttr, processGroup bool) (*child, error) {
 	cmd := exec.Command(path, args...)
-	cmd.Stdout, cmd.Stderr, cmd.Stdin = stdout, stderr, nil
+	cmd.Stdout, cmd.Stderr, cmd.Stdin = stdout, stderr, stdin
 	cmd.SysProcAttr = attrs
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	c := &child{cmd: cmd, done: make(chan error, 1)}
+	c := &child{cmd: cmd, done: make(chan error, 1), processGroup: processGroup}
 	go func() { c.done <- cmd.Wait(); close(c.done) }()
 	return c, nil
 }
@@ -64,11 +76,19 @@ func (c *child) stop(grace time.Duration) {
 			return
 		default:
 		}
-		_ = syscall.Kill(-c.cmd.Process.Pid, syscall.SIGTERM)
+		if c.processGroup {
+			_ = syscall.Kill(-c.cmd.Process.Pid, syscall.SIGTERM)
+		} else {
+			_ = c.cmd.Process.Signal(syscall.SIGTERM)
+		}
 		select {
 		case <-c.done:
 		case <-time.After(grace):
-			_ = syscall.Kill(-c.cmd.Process.Pid, syscall.SIGKILL)
+			if c.processGroup {
+				_ = syscall.Kill(-c.cmd.Process.Pid, syscall.SIGKILL)
+			} else {
+				_ = c.cmd.Process.Kill()
+			}
 			<-c.done
 		}
 	})
@@ -93,7 +113,7 @@ func (r Runtime) startSSHD(ctx context.Context) (*child, int, error) {
 		if err = WriteRuntimeConfig(r.Paths, r.Enrollment, r.LocalUser, r.Herdr, port); err != nil {
 			return nil, 0, err
 		}
-		c, err := startChild(r.SSHD, []string{"-D", "-e", "-f", r.Paths.SSHDConfig}, r.Stdout, r.Stderr)
+		c, err := startChild(r.SSHD, []string{"-D", "-e", "-f", r.Paths.SSHDConfig}, nil, r.Stdout, r.Stderr)
 		if err != nil {
 			return nil, 0, fmt.Errorf("start sshd: %w", err)
 		}
@@ -133,35 +153,117 @@ func (r Runtime) startSSHD(ctx context.Context) (*child, int, error) {
 	return nil, 0, last
 }
 
-func (r Runtime) Run(ctx context.Context) error {
+func HerdrServerArgs() []string { return []string{"--session", herdrSession, "server"} }
+func HerdrTUIArgs() []string    { return []string{"--session", herdrSession} }
+func HerdrStopArgs() []string   { return []string{"--session", herdrSession, "server", "stop"} }
+
+func (r Runtime) startInfrastructure(ctx context.Context) (*child, context.CancelFunc, <-chan struct{}, int, error) {
 	runCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
 	sshd, localPort, err := r.startSSHD(runCtx)
+	if err != nil {
+		cancel()
+		return nil, nil, nil, 0, err
+	}
+	r.Logger.Printf("local callback sshd listening on 127.0.0.1:%d", localPort)
+	tunnelDone := make(chan struct{})
+	go func() {
+		defer close(tunnelDone)
+		r.tunnelLoop(runCtx, localPort)
+	}()
+	return sshd, cancel, tunnelDone, localPort, nil
+}
+
+func (r Runtime) stopHerdrServer() {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, r.Herdr, HerdrStopArgs()...)
+	cmd.Stdout, cmd.Stderr = r.Stdout, r.Stderr
+	if err := cmd.Run(); err != nil {
+		r.Logger.Printf("stopping Herdr session: %v", err)
+	}
+}
+
+// RunInteractive owns one complete invocation: detached-compatible Herdr
+// server, visible TUI, callback sshd, and reconnecting tunnel. Leaving the TUI
+// intentionally tears all four down.
+func (r Runtime) RunInteractive(ctx context.Context) error {
+	sshd, cancel, tunnelDone, _, err := r.startInfrastructure(ctx)
 	if err != nil {
 		return err
 	}
-	defer sshd.stop(5 * time.Second)
-	r.Logger.Printf("local callback sshd listening on 127.0.0.1:%d", localPort)
+	defer func() {
+		cancel()
+		sshd.stop(5 * time.Second)
+		<-tunnelDone
+	}()
 
-	herdr, err := startDetachedChild(r.Herdr, []string{"--session", "familiar-fleet", "server"}, r.Stdout, r.Stderr)
+	server, err := startDetachedChild(r.Herdr, HerdrServerArgs(), r.Stdout, r.Stderr)
 	if err != nil {
-		return fmt.Errorf("start herdr: %w", err)
+		return fmt.Errorf("start Herdr server: %w", err)
 	}
-	defer herdr.stop(10 * time.Second)
-	r.Logger.Printf("Herdr session familiar-fleet started")
+	defer server.stop(10 * time.Second)
+	r.Logger.Printf("Herdr session %s server started", herdrSession)
 
-	tunnelDone := make(chan struct{})
-	go func() { defer close(tunnelDone); r.tunnelLoop(runCtx, localPort) }()
+	tui, err := startForegroundChild(r.Herdr, HerdrTUIArgs(), r.Stdin, r.TUIOut, r.TUIErr)
+	if err != nil {
+		r.stopHerdrServer()
+		return fmt.Errorf("start Herdr TUI: %w", err)
+	}
 	var result error
 	select {
-	case err := <-herdr.done:
-		result = fmt.Errorf("Herdr exited: %w", exitError(err))
+	case err := <-tui.done:
+		if err != nil {
+			result = fmt.Errorf("Herdr TUI exited: %w", err)
+		}
+	case err := <-server.done:
+		result = fmt.Errorf("Herdr server exited unexpectedly: %w", exitError(err))
+		tui.stop(5 * time.Second)
+	case err := <-sshd.done:
+		result = fmt.Errorf("local sshd exited unexpectedly: %w", exitError(err))
+		tui.stop(5 * time.Second)
+	case <-ctx.Done():
+		tui.stop(5 * time.Second)
+	}
+	cancel()
+	sshd.stop(5 * time.Second)
+	<-tunnelDone
+	r.stopHerdrServer()
+	server.stop(10 * time.Second)
+	return result
+}
+
+// RunHerdr is the managed-service/headless Herdr component. The child inherits
+// the caller's complete environment, including PATH used for spawned terminals.
+func (r Runtime) RunHerdr(ctx context.Context) error {
+	server, err := startDetachedChild(r.Herdr, HerdrServerArgs(), r.Stdout, r.Stderr)
+	if err != nil {
+		return fmt.Errorf("start Herdr server: %w", err)
+	}
+	select {
+	case err := <-server.done:
+		if err != nil {
+			return fmt.Errorf("Herdr server exited: %w", err)
+		}
+		return nil
+	case <-ctx.Done():
+		server.stop(10 * time.Second)
+		return nil
+	}
+}
+
+// RunTunnel runs only the local callback sshd and reconnecting reverse tunnel.
+func (r Runtime) RunTunnel(ctx context.Context) error {
+	sshd, cancel, tunnelDone, _, err := r.startInfrastructure(ctx)
+	if err != nil {
+		return err
+	}
+	var result error
+	select {
 	case err := <-sshd.done:
 		result = fmt.Errorf("local sshd exited unexpectedly: %w", exitError(err))
 	case <-ctx.Done():
 	}
 	cancel()
-	herdr.stop(10 * time.Second)
 	sshd.stop(5 * time.Second)
 	<-tunnelDone
 	return result
@@ -171,7 +273,7 @@ func (r Runtime) tunnelLoop(ctx context.Context, localPort int) {
 	attempt := 0
 	for ctx.Err() == nil {
 		args := TunnelArgsForPort(r.Paths, r.Enrollment, localPort)
-		c, err := startChild(r.SSH, args, r.Stdout, r.Stderr)
+		c, err := startChild(r.SSH, args, nil, r.Stdout, r.Stderr)
 		if err == nil {
 			r.Logger.Printf("reverse tunnel process started")
 			started := time.Now()
@@ -209,7 +311,6 @@ func backoff(attempt int) time.Duration {
 	if base > 30*time.Second {
 		base = 30 * time.Second
 	}
-	// A small positive jitter prevents a fleet-wide reconnect wave while preserving the cap.
 	maxJitter := base / 5
 	if base+maxJitter > 30*time.Second {
 		maxJitter = 30*time.Second - base
@@ -246,4 +347,16 @@ func FindBinary(name string) (string, error) {
 		return "", errors.New("executable path contains a newline")
 	}
 	return path, nil
+}
+
+func OpenLog(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err := f.Chmod(0600); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
 }

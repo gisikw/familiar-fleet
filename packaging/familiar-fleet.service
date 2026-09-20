@@ -1,11 +1,11 @@
 [Unit]
-Description=Familiar Fleet client
-After=network-online.target
-Wants=network-online.target
+Description=Familiar Fleet reverse tunnel
+After=network-online.target familiar-fleet-herdr.service
+Wants=network-online.target familiar-fleet-herdr.service
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/familiar-fleet run
+ExecStart=%h/.local/bin/familiar-fleet --state-dir %h/.local/state/familiar-fleet tunnel
 Restart=on-failure
 RestartSec=10
 TimeoutStopSec=20

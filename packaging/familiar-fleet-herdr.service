@@ -1,0 +1,17 @@
+[Unit]
+Description=Familiar Fleet Herdr server
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/familiar-fleet --state-dir %h/.local/state/familiar-fleet herdr
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/state/familiar-fleet
+
+[Install]
+WantedBy=default.target

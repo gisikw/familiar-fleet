@@ -27,22 +27,41 @@ var (
 )
 
 type Paths struct {
-	Dir, State, TunnelKey, TunnelPublicKey, HostKey, HostPublicKey           string
+	Dir, State, Log, TunnelKey, TunnelPublicKey, HostKey, HostPublicKey      string
 	AuthorizedKeys, KnownHosts, SSHDConfig, SSHDPid, HerdrWrapper, SSHBridge string
 }
 
+// ResolveStateDir implements the deterministic state-location precedence used
+// by both interactive and service invocations. An explicit override always
+// wins; root deliberately ignores HOME and XDG defaults.
+func ResolveStateDir(override string, euid int, xdgStateHome, home string) (string, error) {
+	if override != "" {
+		return override, nil
+	}
+	if euid == 0 {
+		return "/var/lib/familiar-fleet", nil
+	}
+	if xdgStateHome != "" {
+		return filepath.Join(xdgStateHome, "familiar-fleet"), nil
+	}
+	if home == "" {
+		return "", errors.New("home directory is empty")
+	}
+	return filepath.Join(home, ".local", "state", "familiar-fleet"), nil
+}
+
 func StatePaths(override string) (Paths, error) {
-	dir := override
-	if dir == "" {
-		base := os.Getenv("XDG_STATE_HOME")
-		if base == "" {
-			home, err := os.UserHomeDir()
-			if err != nil {
-				return Paths{}, fmt.Errorf("find home directory: %w", err)
-			}
-			base = filepath.Join(home, ".local", "state")
+	home := ""
+	if override == "" && os.Geteuid() != 0 && os.Getenv("XDG_STATE_HOME") == "" {
+		var err error
+		home, err = os.UserHomeDir()
+		if err != nil {
+			return Paths{}, fmt.Errorf("find home directory: %w", err)
 		}
-		dir = filepath.Join(base, "familiar-fleet")
+	}
+	dir, err := ResolveStateDir(override, os.Geteuid(), os.Getenv("XDG_STATE_HOME"), home)
+	if err != nil {
+		return Paths{}, err
 	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
@@ -52,7 +71,7 @@ func StatePaths(override string) (Paths, error) {
 		return Paths{}, errors.New("state directory must not contain a colon or control character")
 	}
 	return Paths{
-		Dir: abs, State: filepath.Join(abs, "state.json"),
+		Dir: abs, State: filepath.Join(abs, "state.json"), Log: filepath.Join(abs, "familiar-fleet.log"),
 		TunnelKey: filepath.Join(abs, "tunnel_ed25519"), TunnelPublicKey: filepath.Join(abs, "tunnel_ed25519.pub"),
 		HostKey: filepath.Join(abs, "sshd_host_ed25519"), HostPublicKey: filepath.Join(abs, "sshd_host_ed25519.pub"),
 		AuthorizedKeys: filepath.Join(abs, "authorized_keys"), KnownHosts: filepath.Join(abs, "known_hosts"),
@@ -184,23 +203,39 @@ func atomicWrite(path string, data []byte, mode os.FileMode) error {
 }
 
 func ValidateEndpoint(raw string) error {
-	u, err := url.Parse(raw)
-	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
-		return errors.New("endpoint must be an absolute URL without credentials, query, or fragment")
+	_, err := CanonicalEndpoint(raw)
+	return err
+}
+
+func CanonicalEndpoint(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+		return "", errors.New("endpoint must be an absolute URL without credentials, query, or fragment")
 	}
-	if u.Scheme == "https" {
-		return nil
+	u.Scheme = strings.ToLower(u.Scheme)
+	u.Host = strings.ToLower(u.Host)
+	if u.Scheme != "https" {
+		host := u.Hostname()
+		ip := net.ParseIP(host)
+		if u.Scheme != "http" || !(host == "localhost" || ip != nil && ip.IsLoopback()) {
+			return "", errors.New("endpoint must use HTTPS (HTTP is allowed only for loopback testing)")
+		}
 	}
-	host := u.Hostname()
-	if u.Scheme == "http" && (host == "localhost" || net.ParseIP(host) != nil && net.ParseIP(host).IsLoopback()) {
-		return nil
+	u.Path = strings.TrimRight(u.Path, "/")
+	u.RawPath = strings.TrimRight(u.RawPath, "/")
+	return u.String(), nil
+}
+
+func ValidateMachineName(name string) error {
+	if !labelRE.MatchString(name) {
+		return errors.New("use 1-253 letters, digits, dots, underscores, or hyphens; start with a letter or digit")
 	}
-	return errors.New("endpoint must use HTTPS (HTTP is allowed only for loopback testing)")
+	return nil
 }
 
 func ValidateEnrollmentRequest(r EnrollmentRequest) error {
-	if !labelRE.MatchString(r.Host) {
-		return errors.New("invalid requested host label (use --name with letters, digits, dot, underscore, or hyphen)")
+	if err := ValidateMachineName(r.Host); err != nil {
+		return fmt.Errorf("invalid requested host label: %w", err)
 	}
 	if !userRE.MatchString(r.SSHUser) {
 		return errors.New("invalid local SSH user")
