@@ -21,6 +21,11 @@ func writeToken(t *testing.T, path, contents string) {
 	}
 }
 
+func writeTiamatURL(t *testing.T, p Paths, contents string) {
+	t.Helper()
+	writeToken(t, p.TiamatURLFile, contents)
+}
+
 func TestResolveTiamatRequiresURL(t *testing.T) {
 	p := testPaths(t)
 	writeToken(t, p.TiamatTokenFile, secretValue)
@@ -34,10 +39,48 @@ func TestResolveTiamatRequiresURL(t *testing.T) {
 		if err == nil {
 			t.Fatalf("expected missing-URL error for %v", env)
 		}
-		// The message must name the variable and show how to fix it.
-		if !strings.Contains(err.Error(), TiamatURLEnv) || !strings.Contains(err.Error(), "https://") {
+		// The message must name both supported configuration seams.
+		if !strings.Contains(err.Error(), TiamatURLEnv) || !strings.Contains(err.Error(), p.TiamatURLFile) {
 			t.Errorf("error is not actionable: %v", err)
 		}
+	}
+}
+
+func TestResolveTiamatDefaultsURLToFileAndAllowsEnvOverride(t *testing.T) {
+	p := testPaths(t)
+	writeToken(t, p.TiamatTokenFile, secretValue)
+	writeTiamatURL(t, p, "  https://from-file.internal\n")
+
+	got, err := ResolveTiamat(p, map[string]string{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.URL != "https://from-file.internal" {
+		t.Fatalf("URL = %q", got.URL)
+	}
+
+	got, err = ResolveTiamat(p, map[string]string{TiamatURLEnv: " https://override.internal "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.URL != "https://override.internal" {
+		t.Fatalf("override URL = %q", got.URL)
+	}
+}
+
+func TestResolveTiamatRejectsInvalidURLFiles(t *testing.T) {
+	for name, contents := range map[string]string{
+		"empty":     " \n",
+		"multiline": "https://one.internal\nhttps://two.internal",
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := testPaths(t)
+			writeToken(t, p.TiamatTokenFile, secretValue)
+			writeTiamatURL(t, p, contents)
+			if _, err := ResolveTiamat(p, map[string]string{}); err == nil {
+				t.Fatal("expected invalid URL file error")
+			}
+		})
 	}
 }
 

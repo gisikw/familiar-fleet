@@ -10,18 +10,18 @@ import (
 // client only resolves and validates them; it never reads token contents and
 // never fetches, mints, or persists a credential.
 const (
-	// TiamatURLEnv is the Tiamat router base URL. It has no deterministic
-	// default, so the preflight requires it explicitly.
+	// TiamatURLEnv overrides the node-local Tiamat URL file.
 	TiamatURLEnv = "FAMILIAR_TIAMAT_URL"
 	// TiamatTokenFileEnv points at the file holding the Tiamat token. When it
 	// is unset, the preflight uses <state>/secrets/tiamat.token.
 	TiamatTokenFileEnv = "FAMILIAR_TIAMAT_TOKEN_FILE"
 )
 
-// TiamatPreflight is the resolved, validated Tiamat configuration. It holds
-// locations only: the token value is deliberately never loaded.
+// TiamatPreflight is the resolved, validated Tiamat configuration. The token
+// value is deliberately never loaded.
 type TiamatPreflight struct {
-	// URL is the required, non-empty FAMILIAR_TIAMAT_URL.
+	// URL is the required, non-empty router URL resolved from the environment
+	// override or the node-local URL file.
 	URL string
 	// TokenFile is the path exported to the Herdr server and its panes.
 	TokenFile string
@@ -33,7 +33,9 @@ type TiamatPreflight struct {
 // ResolveTiamat validates the Tiamat inputs the Familiar-owned Herdr server and
 // every pane it spawns must inherit. It fails closed: a Herdr agent started
 // without a usable router URL and token file would otherwise surface much later
-// as an opaque in-pane failure.
+// as an opaque in-pane failure. FAMILIAR_TIAMAT_URL overrides the node-local
+// <state>/secrets/tiamat.url file, which keeps deployment configuration out of a
+// user's general shell environment.
 //
 // The token file is required to exist as a readable, regular, non-empty file,
 // but its contents are never inspected. Some routers behind the firewall do not
@@ -46,7 +48,11 @@ func ResolveTiamat(paths Paths, env map[string]string) (TiamatPreflight, error) 
 
 	result.URL = strings.TrimSpace(env[TiamatURLEnv])
 	if result.URL == "" {
-		return result, fmt.Errorf("%s is required before the Herdr server starts; set it to the Tiamat router URL (for example %s=https://tiamat.internal) in the service environment", TiamatURLEnv, TiamatURLEnv)
+		var err error
+		result.URL, err = readTiamatURLFile(paths.TiamatURLFile)
+		if err != nil {
+			return result, fmt.Errorf("Tiamat router URL is required before the Herdr server starts: %w; write it to %s or set %s as an override", err, paths.TiamatURLFile, TiamatURLEnv)
+		}
 	}
 
 	if explicit := strings.TrimSpace(env[TiamatTokenFileEnv]); explicit != "" {
@@ -59,6 +65,34 @@ func ResolveTiamat(paths Paths, env map[string]string) (TiamatPreflight, error) 
 		return TiamatPreflight{}, err
 	}
 	return result, nil
+}
+
+func readTiamatURLFile(path string) (string, error) {
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return "", fmt.Errorf("URL file does not exist")
+	}
+	if err != nil {
+		return "", fmt.Errorf("URL file is unusable: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("URL file must be a regular file, not %s", info.Mode().Type())
+	}
+	if info.Size() > 4096 {
+		return "", fmt.Errorf("URL file exceeds 4096 bytes")
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("URL file is not readable by this user: %w", err)
+	}
+	value := strings.TrimSpace(string(contents))
+	if value == "" {
+		return "", fmt.Errorf("URL file is empty")
+	}
+	if strings.ContainsAny(value, "\r\n\x00") {
+		return "", fmt.Errorf("URL file must contain exactly one URL")
+	}
+	return value, nil
 }
 
 // checkTokenFile enforces readability without ever reading the token: it opens

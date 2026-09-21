@@ -38,10 +38,11 @@ type Paths struct {
 	// generated HERDR_CONFIG_PATH for the Familiar-owned server.
 	RuntimeDir, PiDir, PaneShell, HerdrConfig string
 	// SecretsDir is the operator-owned directory (mode 0700) holding node-local
-	// secrets this client reads but never writes or downloads. TiamatTokenFile is
-	// the deterministic default token path inside it; its contents are never
-	// read into state, logs, or the environment.
-	SecretsDir, TiamatTokenFile string
+	// configuration this client reads but never writes or downloads.
+	// TiamatURLFile and TiamatTokenFile are deterministic defaults inside it.
+	// The URL is exported to workers; token contents are never read into state,
+	// logs, or the environment.
+	SecretsDir, TiamatURLFile, TiamatTokenFile string
 }
 
 // ResolveStateDir implements the deterministic state-location precedence used
@@ -92,7 +93,7 @@ func StatePaths(override string) (Paths, error) {
 		HerdrWrapper: filepath.Join(abs, "herdr"), SSHBridge: filepath.Join(abs, "ssh-bridge"),
 		RuntimeDir: filepath.Join(abs, "runtime"), PiDir: filepath.Join(abs, "runtime", "pi"),
 		PaneShell: filepath.Join(abs, "pane-shell"), HerdrConfig: filepath.Join(abs, "herdr-config.toml"),
-		SecretsDir: filepath.Join(abs, "secrets"), TiamatTokenFile: filepath.Join(abs, "secrets", "tiamat.token"),
+		SecretsDir: filepath.Join(abs, "secrets"), TiamatURLFile: filepath.Join(abs, "secrets", "tiamat.url"), TiamatTokenFile: filepath.Join(abs, "secrets", "tiamat.token"),
 	}, nil
 }
 

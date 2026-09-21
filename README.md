@@ -150,7 +150,8 @@ Before the Familiar-owned Herdr server starts (`familiar-fleet` or
 above), and then a preflight:
 
 1. requires a valid `runtime/current`, which the true-up has just established;
-2. requires `FAMILIAR_TIAMAT_URL` and a usable Tiamat token file (see below);
+2. resolves a Tiamat router URL from the node-local file or environment override
+   and requires a usable Tiamat token file (see below);
 3. resolves the user's shell from `$SHELL` (falling back to `/bin/sh` with a logged
    note; refusing to select the Familiar launcher itself);
 4. regenerates `<state>/pane-shell` and `<state>/shell/*`;
@@ -172,9 +173,12 @@ fails loudly and without side effects.
 Herdr agents talk to a Tiamat router, so both inputs must be settled before the
 server starts rather than surfacing later as an opaque in-pane failure:
 
-- **`FAMILIAR_TIAMAT_URL` is required and must be non-empty.** There is no sensible
-  default, so the preflight refuses to start Herdr without it and names the variable
-  in the error. Set it in the service environment.
+- **The router URL is required and must be non-empty.** By default it is read from
+  `<state>/secrets/tiamat.url`. A non-empty `FAMILIAR_TIAMAT_URL` overrides that
+  file, which is useful for managed services and temporary deployment changes
+  without requiring interactive users to pollute their general shell environment.
+  The URL file must be readable, regular, at most 4096 bytes, and contain exactly
+  one URL; surrounding whitespace and one trailing newline are ignored.
 - **The token file must already exist.** If `FAMILIAR_TIAMAT_TOKEN_FILE` is set it is
   used as-is; otherwise the path is deterministically `<state>/secrets/tiamat.token`.
   Either way the resolved path is exported to the Herdr server and every pane, so a
@@ -186,18 +190,20 @@ placeholder token is perfectly valid, because some routers behind the firewall d
 not actually require authentication; the check is that a token *file* is present,
 not that the token is meaningful.
 
-Provisioning that file is the operator's job. `familiar-fleet` never creates it,
-never downloads a secret, and never persists an OAuth token: the runtime stays
-public and immutable, and nothing in this path writes credentials.
+Provisioning these files is the operator's job. `familiar-fleet` never creates
+or downloads them and never persists an OAuth token: the runtime stays public and
+immutable, and nothing in this path writes credentials.
 
 ```sh
 mkdir -p -m 700 "$STATE/secrets"
+printf '%s\n' 'https://tiamat.internal' > "$STATE/secrets/tiamat.url"
+chmod 600 "$STATE/secrets/tiamat.url"
 install -m 600 /dev/null "$STATE/secrets/tiamat.token"
 printf '%s' "$TIAMAT_TOKEN" > "$STATE/secrets/tiamat.token"   # a placeholder is fine
 ```
 
-`<state>/secrets/` should be mode `0700` and the token file mode `0600`. The
-operational log records the router URL and the token *path* only.
+`<state>/secrets/` should be mode `0700` and both files mode `0600`. The
+operational log records the resolved router URL and the token *path* only.
 
 Environment supplied by `workspace.create` may still override semantic values where
 applicable; ordinary Herdr agent starts inherit these preflighted values.
@@ -408,8 +414,9 @@ strict pinned host checking, keepalives, and:
 
 Connect interactively once before installing services; `connect` also activates the
 enrolled runtime, and each service start trues it up again.
-Provision `<state>/secrets/tiamat.token` and set `FAMILIAR_TIAMAT_URL` in the
-`herdr` unit as well; without both, the Herdr server refuses to start.
+Provision `<state>/secrets/tiamat.url` and `<state>/secrets/tiamat.token`, or set
+`FAMILIAR_TIAMAT_URL` as a service-environment override; without a URL and token
+file, the Herdr server refuses to start.
 Always choose an explicit,
 durable state path in service definitions. Run the split `herdr` and `tunnel`
 components rather than the interactive command.
